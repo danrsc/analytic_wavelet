@@ -2,10 +2,11 @@ import inspect
 import numpy as np
 import scipy.special
 from scipy.fftpack import ifft, fft
+from scipy.interpolate import interp1d
 import warnings
 
 
-__all__ = ['GeneralizedMorseWavelet', 'rotate', 'analytic_wavelet_transform']
+__all__ = ['GeneralizedMorseWavelet', 'rotate', 'analytic_wavelet_transform', 'transform_maxima']
 
 
 class GeneralizedMorseWavelet:
@@ -46,15 +47,16 @@ class GeneralizedMorseWavelet:
         """
         return np.sqrt(self.beta * self.gamma)
 
-    def demodulated_skewness_as_real(self):
+    def demodulated_skewness_imag(self):
         """
         This value is a real number even though the skewness is purely imaginary.
+        Like calling np.imag(demodulated_skewness)
         To get the actual skewness multiply by 1j
         """
         return (self.gamma - 3) / self.time_domain_width()
 
     def demodulated_kurtosis(self):
-        return 3 - np.power(self.demodulated_skewness_as_real(), 2) - (2 / np.power(self.time_domain_width(), 2))
+        return 3 - np.power(self.demodulated_skewness_imag(), 2) - (2 / np.power(self.time_domain_width(), 2))
 
     def peak_frequency(self):
         """
@@ -64,9 +66,7 @@ class GeneralizedMorseWavelet:
             with warnings.catch_warnings():
                 warnings.filterwarnings('ignore', category=RuntimeWarning)
                 result = np.exp((1 / self.gamma) * (np.log(self.beta) - np.log(self.gamma)))
-            indicator_beta_zero = self.beta == 0
-            result[indicator_beta_zero] = np.power(np.log(2), 1 / self.gamma[indicator_beta_zero])
-            return result
+            return np.where(self.beta == 0, np.power(np.log(2), 1 / self.gamma), result)
         elif self.beta == 0:
             return np.power(np.log(2), 1 / self.gamma)
         else:
@@ -90,8 +90,8 @@ class GeneralizedMorseWavelet:
         """
         The curvature of instantaneous frequency evaluated at the wavelet center
         """
-        _, _, frequency_cumulants, _ = self.cumulants(3)
-        return frequency_cumulants[2] / np.sqrt(np.power(frequency_cumulants[1], 3))
+        _, frequency_cumulants = self.frequency_domain_cumulants(3)
+        return frequency_cumulants[3] / np.sqrt(np.power(frequency_cumulants[2], 3))
 
     def log_spaced_frequencies(self, num_timepoints, high=None, low=None, density=4):
         if high is None:
@@ -156,7 +156,6 @@ class GeneralizedMorseWavelet:
 
     @staticmethod
     def _moments_to_cumulants(moments):
-        moments = np.asarray(moments)
         result = np.full(moments.shape, np.nan)
         result[0] = np.log(moments[0])
         for idx in range(1, len(moments)):
@@ -166,41 +165,36 @@ class GeneralizedMorseWavelet:
             result[idx] = (moments[idx] / moments[0]) - coefficients
         return result
 
-    @staticmethod
-    def _first_moment(gamma, beta):
-        return 1 / (2 * np.pi * gamma) * scipy.special.gamma((beta + 1) / gamma)
+    def frequency_domain_moment(self, order):
+        return (self.amplitude()
+                * (1 / (2 * np.pi * self.gamma) * scipy.special.gamma((self.beta + order + 1) / self.gamma)))
 
-    def _moment_helper(self, order):
-        return self.amplitude() * GeneralizedMorseWavelet._first_moment(self.gamma, self.beta + order)
+    def energy_moment(self, order):
+        return ((2 / np.power(2, (order + 1) / self.gamma))
+                * GeneralizedMorseWavelet.replace(self, beta=2*self.beta).frequency_domain_moment(order))
 
-    def moments(self, order):
-        frequency_domain_moment = self._moment_helper(order)
-        # energy_domain_moment = (np.power(morse_amplitude(gamma, beta), 2) / morse_amplitude(gamma, 2 * beta)) \
-        #                        * (1 / np.power(2, (2 * beta + 1 + order) / gamma)) \
-        #                        * _morse_moment_helper(order, gamma, 2 * beta)
-        energy_domain_moment = ((2 / np.power(2, (order + 1) / self.gamma))
-                                * GeneralizedMorseWavelet.replace(self, beta=2*self.beta)._moment_helper(order))
-        return frequency_domain_moment, energy_domain_moment
-
-    def cumulants(self, max_order):
-        frequency = None
-        energy = None
+    def frequency_domain_cumulants(self, max_order):
+        moments = None
         for order in range(max_order + 1):
-            freq_domain, energy_domain = self.moments(order)
-            if frequency is None:
-                frequency = np.full((max_order + 1,) + freq_domain.shape, np.nan)
-                energy = np.full((max_order + 1,) + energy_domain.shape, np.nan)
-            frequency[order] = freq_domain
-            energy[order] = energy_domain
-        return (frequency,
-                energy,
-                GeneralizedMorseWavelet._moments_to_cumulants(frequency),
-                GeneralizedMorseWavelet._moments_to_cumulants(energy))
+            moment = self.frequency_domain_moment(order)
+            if moments is None:
+                moments = np.full((max_order + 1,) + moment.shape, np.nan)
+            moments[order] = moment
+        return moments, GeneralizedMorseWavelet._moments_to_cumulants(moments)
 
-    def make_wavelet(self, num_timepoints, fs, k=1):
+    def energy_cumulants(self, max_order):
+        moments = None
+        for order in range(max_order + 1):
+            moment = self.energy_moment(order)
+            if moments is None:
+                moments = np.full((max_order + 1,) + moment.shape, np.nan)
+            moments[order] = moment
+        return moments, GeneralizedMorseWavelet._moments_to_cumulants(moments)
+
+    def make_wavelet(self, num_timepoints, scale_frequencies, num_orthogonal_family_members=1):
         fo = self.peak_frequency()
         # (freq, 1)
-        fact = np.expand_dims(np.abs(fs) / fo, 1)
+        fact = np.expand_dims(np.abs(scale_frequencies) / fo, 1)
         # omega is (freq, time)
         omega = np.expand_dims(2 * np.pi * np.linspace(0, 1 - (1 / num_timepoints), num_timepoints), 0) / fact
         if self.is_bandpass_normalized:
@@ -219,32 +213,32 @@ class GeneralizedMorseWavelet:
         # psi_zero is (freq, time)
         psi_zero[:, 0] = 1 / 2 * psi_zero[:, 0]
         psi_zero = np.where(np.isnan(psi_zero), 0, psi_zero)
-        psi_f = self._first_family(fact, num_timepoints, k, omega, psi_zero)
+        psi_f = self._first_family(fact, num_timepoints, num_orthogonal_family_members, omega, psi_zero)
         psi_f = np.where(np.isinf(psi_f), 0, psi_f)
         omega = np.expand_dims(omega, 0)
         fact = np.expand_dims(fact, 0)
         psi = ifft(psi_f * rotate(omega * (num_timepoints + 1) / 2 * fact))
 
-        indicator_neg_fs = fs < 0
+        indicator_neg_sf = scale_frequencies < 0
 
-        psi[:, indicator_neg_fs, :] = np.conj(psi[:, indicator_neg_fs, :])
-        psi_f[:, indicator_neg_fs, 1:] = np.flip(psi_f[:, indicator_neg_fs, 1:], axis=2)
+        psi[:, indicator_neg_sf, :] = np.conj(psi[:, indicator_neg_sf, :])
+        psi_f[:, indicator_neg_sf, 1:] = np.flip(psi_f[:, indicator_neg_sf, 1:], axis=2)
 
-        if k == 1:
+        if num_orthogonal_family_members == 1:
             psi = np.squeeze(psi, axis=0)
             psi_f = np.squeeze(psi_f, axis=0)
 
         return psi, psi_f
 
-    def _first_family(self, fact, num_timepoints, k_max, omega, psi_zero):
+    def _first_family(self, fact, num_timepoints, num_orthogonal_family_members, omega, psi_zero):
         r = (2 * self.beta + 1) / self.gamma
         c = r - 1
         # (freq, time)
         ell = np.zeros_like(omega)
         indices = np.arange(int(np.ceil(num_timepoints / 2)))
         # (wavelet, freq, time)
-        psi_f = np.zeros((k_max, psi_zero.shape[0], psi_zero.shape[1]), dtype=psi_zero.dtype)
-        for k in range(k_max):
+        psi_f = np.zeros((num_orthogonal_family_members, psi_zero.shape[0], psi_zero.shape[1]), dtype=psi_zero.dtype)
+        for k in range(num_orthogonal_family_members):
             if self.is_bandpass_normalized:
                 if self.beta == 0:
                     coeff = 1
@@ -266,6 +260,46 @@ class GeneralizedMorseWavelet:
                 scipy.special.gammaln(k + c + 1) - scipy.special.gammaln(c + m + 1) - scipy.special.gammaln(k - m + 1))
             y += np.power(-1, m) * fact * np.power(x, m) / scipy.special.gamma(m + 1)
         return y
+
+    def zeta(self, mu):
+        """
+        The maximum of the Morse wavelet transform of another wavelet
+        """
+        if self.is_bandpass_normalized:
+            numerator = (self.beta / (mu + 1)) ** (self.beta / self.gamma)
+            denominator = ((self.beta / (mu + 1)) + 1) ** ((self.beta + mu + 1) / self.gamma)
+        else:
+            numerator = ((self.beta + 1 / 2) / (mu + 1 / 2)) ** ((self.beta + 1 / 2) / self.gamma)
+            denominator = ((self.beta + 1 / 2) / (mu + 1 / 2) + 1) ** ((self.beta + mu + 1) / self.gamma)
+        mu_morse = GeneralizedMorseWavelet.replace(self, beta=mu)
+        return ((1 / (2 * np.pi * self.gamma))
+                * self.amplitude()
+                * mu_morse.amplitude()
+                * scipy.special.gamma((self.beta + mu + 1) / self.gamma)
+                * (numerator / denominator))
+
+    def maxima_parameters(self, maxima_values, maxima_scale_frequencies, mu):
+        """
+        Estimates the parameters of the events corresponding to the maxima
+        Args:
+            maxima_values: output from transform_maxima
+            maxima_scale_frequencies: output from transform_maxima
+            mu: ?
+
+        Returns:
+            coefficients (complex), scales, scale_frequencies
+        """
+        mu_morse = GeneralizedMorseWavelet.replace(self, beta=mu)
+        if self.is_bandpass_normalized:
+            f_hat = (maxima_scale_frequencies
+                     * (mu_morse.peak_frequency() / self.peak_frequency())
+                     * (self.beta / (mu + 1)) ** (1 / self.gamma))
+        else:
+            f_hat = (maxima_scale_frequencies
+                     * (mu_morse.peak_frequency() / self.peak_frequency())
+                     * ((self.beta + 1 / 2) / (mu + 1 / 2)) ** (1 / self.gamma))
+        c_hat = 2 * maxima_values / self.zeta(mu)
+        return c_hat, mu_morse.peak_frequency() / f_hat, f_hat
 
 
 def _rotate_main_angle(x):
@@ -309,9 +343,9 @@ def _awt(x, psi_f, is_time_domain_wavelet_real):
         x = x / np.sqrt(2)
 
     psi_f = np.conj(psi_f)
-    # -> (batch, k * fs, time)
+    # -> (batch, k * scale_frequencies, time)
     result = np.expand_dims(fft(x), 1) * np.reshape(psi_f, (1, -1, psi_f.shape[-1]))
-    # -> (batch, k, fs, time) or (batch, fs, time)
+    # -> (batch, k, scale_frequencies, time) or (batch, scale_frequencies, time)
     result = np.reshape(result, (x.shape[0],) + psi_f.shape)
     result = ifft(result)
     if np.isreal(x) and is_time_domain_wavelet_real and not np.isreal(result):
@@ -344,3 +378,56 @@ def analytic_wavelet_transform(x, frequency_domain_wavelet, is_time_domain_wavel
         result[indicator_good] = result_good
     result = np.reshape(result, x_shape[:-1] + result.shape[1:])
     return result
+
+
+def transform_maxima(scale_frequencies, w, min_amplitude=None, freq_axis=-2, time_axis=-1):
+    w0 = w
+    w += np.random.randn(w.shape) * np.finfo(w.dtype).eps
+    w = np.abs(w)
+    indicator = np.logical_not(w == 0)
+    indicator = np.logical_and(indicator, w > np.roll(w, 1, axis=time_axis))
+    indicator = np.logical_and(indicator, w > np.roll(w, -1, axis=time_axis))
+    indicator = np.logical_and(indicator, w > np.roll(w, 1, axis=freq_axis))
+    indicator = np.logical_and(indicator, w > np.roll(w, -1, axis=freq_axis))
+    edges = np.array([0, -1])
+    shape = [1] * len(w.shape)
+    shape[time_axis] = 2
+    np.put_along_axis(indicator, np.reshape(edges, shape), False, time_axis)
+    shape[time_axis] = 1
+    shape[freq_axis] = 2
+    np.put_along_axis(indicator, np.reshape(edges, shape), False, freq_axis)
+    if min_amplitude is not None:
+        indicator = np.logical_and(indicator, w >= min_amplitude)
+    indices = np.nonzero(indicator)
+    freq_indices = indices[freq_axis]
+    indices_less_1 = indices[:freq_axis] + (freq_indices - 1) + indices[freq_axis + 1:]
+    indices_plus_1 = indices[:freq_axis] + (freq_indices + 1) + indices[freq_axis + 1:]
+    _, freq_hat = _quadratic_interpolate(
+        freq_indices - 1, freq_indices, freq_indices + 1,
+        np.abs(w0[indices_less_1]), np.abs(w0[indices]), np.abs(w0[indices_plus_1]))
+    interpolated = _quadratic_interpolate(
+        freq_indices - 1, freq_indices, freq_indices + 1,
+        w0[indices_less_1], w0[indices], w0[indices_plus_1], freq_hat)
+    scale_frequencies_interp = interp1d(np.arange(len(scale_frequencies)), scale_frequencies)
+    return indices, interpolated, scale_frequencies_interp(freq_hat)
+
+
+def _quadratic_interpolate(t1, t2, t3, x1, x2, x3, t=None):
+    numerator = x1 * (t2 - t3) + x2 * (t3 - t1) + x3 * (t1 - t2)
+    denominator = (t1 - t2) * (t1 - t3) * (t2 - t3)
+    a = numerator / denominator
+
+    numerator = x1 * (t2 ** 2 - t3 ** 2) + x2 * (t3 ** 2 - t1 ** 2) + x3 * (t1 ** 2 - t2 ** 2)
+    b = -numerator / denominator
+
+    numerator = x1 * t2 * t3 * (t2 - t3) + x2 * t3 * t1 * (t3 - t1) + x3 * t1 * t2 * (t1 - t2)
+    c = numerator / denominator
+
+    return_t = t is None
+    if t is None:
+        t = -b / 2 * a
+
+    x = a * t ** 2 + b * t + c
+    if return_t:
+        return x, t
+    return x
