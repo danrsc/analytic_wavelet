@@ -6,7 +6,13 @@ from scipy.interpolate import interp1d
 import warnings
 
 
-__all__ = ['GeneralizedMorseWavelet', 'rotate', 'analytic_wavelet_transform', 'transform_maxima']
+__all__ = [
+    'GeneralizedMorseWavelet',
+    'rotate',
+    'analytic_wavelet_transform',
+    'transform_maxima',
+    'quadratic_interpolate',
+    'linear_interpolate']
 
 
 class GeneralizedMorseWavelet:
@@ -402,17 +408,17 @@ def transform_maxima(scale_frequencies, w, min_amplitude=None, freq_axis=-2, tim
     freq_indices = indices[freq_axis]
     indices_less_1 = indices[:freq_axis] + (freq_indices - 1) + indices[freq_axis + 1:]
     indices_plus_1 = indices[:freq_axis] + (freq_indices + 1) + indices[freq_axis + 1:]
-    _, freq_hat = _quadratic_interpolate(
+    _, freq_hat = quadratic_interpolate(
         freq_indices - 1, freq_indices, freq_indices + 1,
         np.abs(w0[indices_less_1]), np.abs(w0[indices]), np.abs(w0[indices_plus_1]))
-    interpolated = _quadratic_interpolate(
+    interpolated = quadratic_interpolate(
         freq_indices - 1, freq_indices, freq_indices + 1,
         w0[indices_less_1], w0[indices], w0[indices_plus_1], freq_hat)
     scale_frequencies_interp = interp1d(np.arange(len(scale_frequencies)), scale_frequencies)
     return indices, interpolated, scale_frequencies_interp(freq_hat)
 
 
-def _quadratic_interpolate(t1, t2, t3, x1, x2, x3, t=None):
+def quadratic_interpolate(t1, t2, t3, x1, x2, x3, t=None):
     numerator = x1 * (t2 - t3) + x2 * (t3 - t1) + x3 * (t1 - t2)
     denominator = (t1 - t2) * (t1 - t3) * (t2 - t3)
     a = numerator / denominator
@@ -431,3 +437,11 @@ def _quadratic_interpolate(t1, t2, t3, x1, x2, x3, t=None):
     if return_t:
         return x, t
     return x
+
+
+def linear_interpolate(t1, t2, x1, x2, t=None):
+    a = (x2 - x1) / (t2 - t1)
+    b = x1 - a * t1
+    if t is None:
+        return -b / a
+    return a * t + b
