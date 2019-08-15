@@ -2,17 +2,103 @@ import numpy as np
 from .analytic_wavelet_transform_moments import instantaneous_frequency, amplitude, first_central_diff
 from .analytic_wavelet import rotate, quadratic_interpolate, linear_interpolate, GeneralizedMorseWavelet
 
-__all__ = ['ridge_walk']
+
+__all__ = ['ridges', 'ridge_collapse', 'dense_ridge', 'period_indices']
 
 
-def ridge_walk(
+def period_indices(instantaneous_frequencies, spacing=1, dt=1, time_axis=-1):
+    """
+    Returns an array of indices where the indices are computed such that
+        indices[..., i + 1, ...] - indices[..., i, ...] >= spacing * instantaneous_period[..., i, ...] for all i.
+    The returned indices do not contain the first spacing * period and last spacing * period indices.
+    Here i is indexing the time_axis. Since the number of valid indices may differ across axes other than the
+    time_axis, the returned indices will be padded with values that are at least as large as
+    instantaneous_frequencies.shape[time_axis].
+    Args:
+        instantaneous_frequencies: The array from which to compute the indices
+        spacing: How many periods between indices
+        dt: Sample rate used to compute instantaneous frequency
+        time_axis: Which axis in the data is the time axis
+    Returns:
+        indices: An array of shape
+        instantaneous_frequencies.shape[:time_axis] + max_indices + instantaneous_frequencies.shape[(time_axis + 1):]
+    """
+    skips = np.ceil(spacing * ((2 * np.pi) / instantaneous_frequencies * dt)).astype(int)
+    indices = [np.take(skips, 0, time_axis)]
+    indices[-1][indices[-1] >= instantaneous_frequencies.shape[time_axis] - 1] = -1
+    while np.any(indices[-1] >= 0):
+        indices.append(indices[-1] + np.take(skips, indices[-1], time_axis))
+        indices[-1][np.logical_or(indices[-2] < 0, indices[-1] >= instantaneous_frequencies.shape[time_axis] - 1)] = -1
+    # the last indices are all -1, so remove them
+    indices = np.concatenate(indices[:-1], time_axis)
+    # replace negative values with values that will cause index out of bounds if these are used carelessly
+    return np.where(indices < 0, instantaneous_frequencies.shape[time_axis], indices)
+
+
+def dense_ridge(x, original_shape, ridge_indices, fill_value=np.nan):
+    """
+    Converts the sparse 1d representation output by ridges to a dense array
+    Args:
+        x: The 1d array of ridge values to convert to a dense representation
+        original_shape: The shape of the wavelet coefficients input to ridges
+        ridge_indices: The coordinates of the wavelet coefficients output from ridges
+        fill_value: What value to use in the array for coordinates which are not on the ridge
+
+    Returns:
+        dense_x: An array of shape original_shape with ridge values at the appropriate coordinates
+    """
+    result = np.full(original_shape, fill_value, x.dtype)
+    result[ridge_indices] = x
+    return result
+
+
+def ridge_collapse(x_list, original_shape, ridge_indices, scale_axis=-2):
+    """
+    Collapses the multiple ridges output by ridges into a single ridge by combining together ridges which exist
+        simultaneously.
+    Args:
+        x_list: The values on the ridge to collapse. If a list, then the first item in the list must be
+            the wavelet coefficients. If an array, then the array is the wavelet coefficients. All values should
+            be 1d arrays output by ridges
+        original_shape: The shape of the wavelet coefficients array passed in to ridges
+        ridge_indices: The coordinates of the wavelet coefficients, as output by ridges
+        scale_axis: Which axis in the coordinates is the scale axis
+    Returns:
+        x / x_list: The collapsed ridge values
+        ridge_indices: The coordinates of the collapsed ridge values (does not contain scale axis coordinates)
+    """
+    is_singleton = not isinstance(x_list, (list, tuple))
+    if is_singleton:
+        x_list = [x_list]
+    power = None
+    result = list()
+    indicator_ridge = np.full(original_shape, False)
+    indicator_ridge[ridge_indices] = True
+    indicator_ridge = np.max(indicator_ridge, axis=scale_axis)
+    new_indices = np.nonzero(indicator_ridge)
+    del indicator_ridge
+    for idx, item in enumerate(x_list):
+        item = dense_ridge(item, original_shape, ridge_indices, fill_value=0)
+        if idx == 0:
+            if len(x_list) > 1:
+                power = np.square(item)
+            c = np.sum(item, axis=scale_axis)
+        else:
+            c = np.sum(item * power, axis=scale_axis) / np.sum(power, axis=scale_axis)
+        result.append(c[new_indices])
+    if is_singleton:
+        result = result[0]
+    return result, new_indices
+
+
+def ridges(
         x,
         scale_frequencies,
         dt=1,
         ridge_kind='amplitude',
         morse_wavelet=None,
         min_wavelet_lengths_in_ridge=None,
-        trim_half_wavelet_lengths=None,
+        trim_wavelet_lengths=None,
         frequency_max=None,
         frequency_min=None,
         mask=None,
@@ -34,8 +120,8 @@ def ridge_walk(
         morse_wavelet: The wavelet used to compute the analytic wavelet transform. Only used in combination with
             min_wavelet_lengths_in_ridge and trim_half_wavelet_lengths.
         min_wavelet_lengths_in_ridge: A ridge with less than this many wavelet lengths is ignored
-        trim_half_wavelet_lengths: Trims this many half wavelets from each edge since these are contaminated by edge
-            effects. A value of 1 is recommended, but if provided requires morse_wavelet.
+        trim_wavelet_lengths: Trims this many wavelet lengths from the edges of each ridge since these are
+            contaminated by edge effects. A value of 1 is recommended, but if provided requires morse_wavelet.
         frequency_max: Ridge points greater than this frequency will not be considered. Can be an array broadcasting to
             the shape of x but excluding the scale, time, and (if exists) variable axes
         frequency_min: Ridge points lower than this frequency will not be considered. Can be an array broadcasting to
@@ -48,15 +134,26 @@ def ridge_walk(
             based on the transform at a 'tail', and the actual frequency at prospective 'heads'. This mostly does not
             need to change, but for strongly chirping or weakly chirping noisy signals better performance may be
             obtained by adjusting it
+        scale_axis: Which axis of x is the scale axis
+        time_axis: Which axis of x is the time axis
         variable_axis: If specified, then the ridge is computed jointly over this axis
 
     Returns:
-        ridge: The transform values along the ridge.
-        indices: A tuple of indices such that ridge = x[indices]
-        instantaneous_frequencies: Instantaneous frequencies along the ridge
-        instantaneous_bandwidth: Instantaneous bandwidth along the ridge
-        normalized_instantaneous_curvature: Normalized instantaneous curvature along the ridge as a measure of error.
-            Should be << 1 if the ridge estimate is good. Only returned if morse_wavelet is provided
+        ridge_values: A 1d array of interpolated values of x for all points on a ridge
+        indices: A tuple of indices giving coordinates of ridge points in x. If z is an array of zeros
+            with the same shape as x, then z[indices] = ridge_values would have interpolated values of
+            x wherever x has a ridge point and zero everywhere else.
+        ridge_ids: Same shape as ridge_values, giving the id of the ridge for each ridge value
+        instantaneous_frequencies: Same shape as ridge_values. Instantaneous frequencies along the ridge
+        instantaneous_bandwidth: Same shape as ridge_values. Instantaneous bandwidth along the ridge
+        instantaneous_curvature: Same shape as ridge_values. Instantaneous curvature along the ridge
+        total_error: Same shape as ridge_values. A measure of deviation from a multivariate
+            (or univariate) oscillation. Should be << 1 if the ridge estimate is good.
+            Only returned if morse_wavelet is provided
+
+            See equation 62 in
+            Lilly and Olhede (2012), Analysis of Modulated Multivariate
+            Oscillations. IEEE Trans. Sig. Proc., 60 (2), 600--612.
     """
 
     if variable_axis is not None:
@@ -76,17 +173,164 @@ def ridge_walk(
             mask = np.moveaxis(mask, (scale_axis, time_axis), (-2, -1))
             mask = np.reshape(mask, (-1,) + mask.shape[-2:])
 
-    indicator_ridge, ridge_quantity, x, instantaneous_frequencies = _indicator_ridge(
+    # we need to keep this in the multivariate case. _indicator_ridge converts x to 3d (which we want
+    # for _assign_ridge_ids, but we also need to keep the 4d version around for interpolation below)
+    indicator_ridge, ridge_quantity, instantaneous_frequencies = _indicator_ridge(
         x, scale_frequencies, ridge_kind, 0, frequency_min, frequency_max, mask)
+
+    ridge_ids = _assign_ridge_ids(indicator_ridge, ridge_quantity, instantaneous_frequencies, alpha)
+
+    # not sure why this is necessary...points not in the mask are already eliminated earlier,
+    # so I'm not sure how a disallowed point can get into a ridge, but this is in the original
+    # code and breaks up ridges that span disallowed points into multiple ridges with different
+    # ids
+    if mask is not None:
+        _mask_ridges(ridge_ids, mask)
 
     min_periods = None
     if min_wavelet_lengths_in_ridge is not None:
         if morse_wavelet is None:
-            raise ValueError('If min_wavelet_lengths in ridge is given, morse_wavelet must be specified')
-        min_periods = 2 * morse_wavelet.time_domain_width() / np.pi
+            raise ValueError('If min_wavelet_lengths_in_ridge is given, morse_wavelet must be specified')
+        min_periods = min_wavelet_lengths_in_ridge * 2 * morse_wavelet.time_domain_width() / np.pi
 
-    _chain_ridge_points(
-        x, scale_frequencies, indicator_ridge, ridge_quantity, instantaneous_frequencies, min_periods, alpha, mask)
+    trim_periods = None
+    if trim_wavelet_lengths is not None:
+        if morse_wavelet is None:
+            raise ValueError('If trim_wavelet_lengths is given, morse_wavelet must be specified')
+        trim_periods = trim_wavelet_lengths * morse_wavelet.time_domain_width() / np.pi
+
+    # now clean up the ridge ids according to the parameters, interpolate, and compute bias parameters
+    unique_ridge_ids, ridge_id_count = np.unique(ridge_ids, return_counts=True)
+    compressed_id = np.max(unique_ridge_ids) + 1
+    for ridge_id, ridge_count in zip(unique_ridge_ids, ridge_id_count):
+        if ridge_id < 0:
+            continue
+
+        indicator_ridge_id = ridge_ids == ridge_id
+        # remove singleton ridge ids
+        if ridge_count < 2:
+            ridge_ids[indicator_ridge_id] = -1
+            continue
+
+        if min_periods is not None:
+            ridge_batch_indices, ridge_scale_indices, ridge_time_indices = np.nonzero(indicator_ridge_id)
+            ridge_len = np.sum(scale_frequencies[ridge_scale_indices] / (2 * np.pi) * dt)
+            if ridge_len < min_periods:
+                ridge_ids[indicator_ridge_id] = -1
+
+        if trim_wavelet_lengths is not None:
+            ridge_batch_indices, ridge_scale_indices, ridge_time_indices = np.nonzero(indicator_ridge_id)
+            time_sort = np.argsort(ridge_time_indices)
+            age = np.cumsum(scale_frequencies[ridge_scale_indices[time_sort]] / (2 * np.pi) * dt)
+            age = age[np.argsort(time_sort)]
+            indicator_trim = np.logical_or(age <= trim_periods, age >= np.max(age) - trim_periods)
+            trim_batch_indices = ridge_batch_indices[indicator_trim]
+            trim_scale_indices = ridge_scale_indices[indicator_trim]
+            trim_time_indices = ridge_time_indices[indicator_trim]
+            ridge_ids[(trim_batch_indices, trim_scale_indices, trim_time_indices)] = -1
+            indicator_ridge_id = ridge_ids == ridge_id
+
+        # reassign ids so that they will be contiguous
+        ridge_ids[indicator_ridge_id] = compressed_id
+        compressed_id += 1
+
+    # shift the ids to start at 0
+    ridge_ids[ridge_ids >= 0] = ridge_ids[ridge_ids >= 0] - (np.max(unique_ridge_ids) + 1)
+
+    instantaneous_frequencies = instantaneous_frequencies / dt
+    x1 = first_central_diff(x, padding='endpoint') / dt
+    x2 = first_central_diff(x1, padding='nan') / dt
+    x2[..., 0] = x2[..., 1]
+    x2[..., -1] = x2[..., -2]
+
+    if len(x.shape) == 4:
+        # put variable axis last for interpolation
+        x = np.moveaxis(x, 1, -1)
+        x1 = np.moveaxis(x1, 1, -1)
+        x2 = np.moveaxis(x2, 1, -1)
+
+    ridge_indices = np.nonzero(ridge_ids >= 0)
+
+    x, x1, x2, instantaneous_frequencies = _ridge_interpolate(
+        [x, x1, x2, instantaneous_frequencies], ridge_indices, ridge_quantity)
+
+    if len(x.shape) == 2:
+        instantaneous_frequencies = np.expand_dims(instantaneous_frequencies, 1)
+        l2 = np.sqrt(np.sum(np.square(x), axis=1, keepdims=True))
+    else:
+        l2 = np.sqrt(np.square(x))
+
+    bandwidth = (x1 - 1j * instantaneous_frequencies * x) / l2
+    curvature = (x2 - 2 * 1j * instantaneous_frequencies * x1 - instantaneous_frequencies ** 2 * x) / l2
+
+    result = [ridge_ids, x, instantaneous_frequencies, bandwidth, curvature]
+
+    if morse_wavelet is not None:
+        curvature_l2 = np.sqrt(np.sum(np.square(curvature), axis=2, keepdims=True)) \
+            if len(curvature.shape) == 2 else np.sqrt(np.square(curvature))
+        total_err = 1 / 2 * np.square(morse_wavelet.time_domain_width() / instantaneous_frequencies) * curvature_l2
+        result = result + [total_err]
+
+    expanded_shape = ridge_ids.shape if len(x.shape) == 1 else ridge_ids.shape + (x.shape[1],)
+    expanded_ridge_indices = None
+    for idx in range(len(result)):
+        if idx == 0:
+            expanded = np.full(expanded_shape, -1, dtype=int)  # ridge_ids
+        else:
+            expanded = np.full(expanded_shape, np.nan, dtype=result[idx].dtype)
+        if len(expanded_shape) == 4:
+            if len(result[idx].shape) == 3:
+                result[idx] = np.expand_dims(result[idx], 3)
+            if result[idx].shape[3] == 1:
+                result[idx] = np.tile(result[idx], (1, 1, 1, expanded.shape[3]))
+        expanded[ridge_indices] = result[idx]
+        if len(expanded.shape) == 4:
+            # move the variable axis back to axis=1
+            expanded = np.moveaxis(expanded, -1, 1)
+            # reshape back to input shape
+            expanded = np.reshape(expanded, orig_shape)
+            # restore axes
+            expanded = np.moveaxis(expanded, (-3, -2, -1), (variable_axis, scale_axis, time_axis))
+        else:
+            # reshape back to input shape
+            expanded = np.reshape(expanded, orig_shape)
+            # restore axes
+            expanded = np.moveaxis(expanded, (-2, -1), (scale_axis, time_axis))
+        if idx == 0:  # ridge_ids
+            expanded_ridge_indices = np.nonzero(expanded >= 0)
+        result[idx] = expanded[expanded_ridge_indices]
+
+    ridge_ids = result[0]
+    x = result[1]
+    result = result[2:]
+
+    return [x, expanded_ridge_indices, ridge_ids] + result
+
+
+def _mask_ridges(ridge_ids, mask):
+    unique_ridge_ids = np.unique(ridge_ids)
+    next_ridge_id = np.max(unique_ridge_ids) + 1
+    disallowed = np.logical_not(mask)
+    time_indices = np.reshape(np.arange(ridge_ids.shape[-1]), (1, 1, ridge_ids.shape[-1]))
+    for ridge_id in unique_ridge_ids:
+        indicator_ridge = ridge_ids == ridge_id
+        breaks = np.logical_and(indicator_ridge, disallowed)
+        if np.sum(breaks) > 0:
+            # remove the disallowed points from the ridge
+            ridge_ids[breaks] = -1
+            indicator_ridge = ridge_ids == ridge_id
+
+            # find the time indices of the disallowed point
+            break_times = np.flatnonzero(np.max(np.max(breaks, axis=0), axis=0))
+            indicator_skip = np.diff(break_times) > 1
+            # remove all the times that are redundant (contiguous breaks)
+            break_times = np.concatenate([break_times[:1], break_times[1:][indicator_skip]])
+
+            # assign new ids to the points between the breaks
+            for t in break_times:
+                indicator_greater_time = np.logical_and(indicator_ridge, time_indices > t)
+                ridge_ids[indicator_greater_time] = next_ridge_id
+                next_ridge_id += 1
 
 
 def _indicator_ridge(x, scale_frequencies, ridge_kind, min_amplitude, frequency_min, frequency_max, mask):
@@ -136,10 +380,9 @@ def _indicator_ridge(x, scale_frequencies, ridge_kind, min_amplitude, frequency_
     result = np.logical_and(result, np.logical_not(np.isnan(x)))
     result = np.logical_and(result, np.abs(x) >= min_amplitude)
 
-    # remove edges
-    shape = [1] * len(result.shape)
-    shape[-1] = 2
-    np.put_along_axis(result, np.reshape(np.array([0, result.shape[-2]]), shape), False, -2)
+    # remove edges on frequency axis
+    result[:, 0, :] = False
+    result[:, -1, :] = False
 
     if frequency_min is not None:
         if not np.isscalar(frequency_min):
@@ -153,17 +396,16 @@ def _indicator_ridge(x, scale_frequencies, ridge_kind, min_amplitude, frequency_
     if mask is not None:
         result = np.logical_and(result, mask)
 
-    return result, ridge_quantity, x, frequency
+    return result, ridge_quantity, frequency
 
 
-def _chain_ridge_points(
-        x, scale_frequencies, indicator_points, ridge_quantity, instantaneous_frequencies, min_periods, alpha, mask):
+def _assign_ridge_ids(indicator_points, ridge_quantity, instantaneous_frequencies, alpha):
 
     batch_indices, scale_indices, time_indices = np.nonzero(indicator_points)
     df_dt = first_central_diff(instantaneous_frequencies, axis=-1)
-    instantaneous_frequencies, df_dt, x = _ridge_interpolate(
-        [instantaneous_frequencies, df_dt, x], (batch_indices, scale_indices, time_indices), ridge_quantity)
-    ridge_sf = scale_frequencies[scale_indices]
+    instantaneous_frequencies, df_dt = _ridge_interpolate(
+        [instantaneous_frequencies, df_dt], (batch_indices, scale_indices, time_indices), ridge_quantity,
+        keep_shapes=True)
     fr_next = instantaneous_frequencies + df_dt
     fr_prev = instantaneous_frequencies - df_dt
 
@@ -175,13 +417,14 @@ def _chain_ridge_points(
     # scale_indices
     ridge_indices = ridge_indices[(batch_indices, scale_indices, time_indices)]
 
-    instantaneous_frequencies_ridge = _compress(
+    # note: this compression also moves the ridge axis to axis=2 since that's what we mostly work with
+    instantaneous_frequencies_ridge = _compress_scale_axis_to_ridge_axis(
         instantaneous_frequencies,
         max_simultaneous_ridge_points, batch_indices, time_indices, scale_indices, ridge_indices)
-    fr_next_ridge = _compress(
+    fr_next_ridge = _compress_scale_axis_to_ridge_axis(
         fr_next,
         max_simultaneous_ridge_points, batch_indices, time_indices, scale_indices, ridge_indices)
-    fr_prev_ridge = _compress(
+    fr_prev_ridge = _compress_scale_axis_to_ridge_axis(
         fr_prev,
         max_simultaneous_ridge_points, batch_indices, time_indices, scale_indices, ridge_indices)
 
@@ -201,28 +444,34 @@ def _chain_ridge_points(
 
     ridge_ids = np.full(df.shape, -1, dtype=int)
     ridge_ids[(batch_indices, time_indices, ridge_indices)] = np.arange(len(batch_indices))
-    indicator_valid_next = next_ridge_indices >= 0
+    indicator_valid_next = np.logical_and(next_ridge_indices >= 0, time_indices + 1 < ridge_ids.shape[1])
     valid_next_batch_indices = batch_indices[indicator_valid_next]
     valid_next_time_indices = time_indices[indicator_valid_next]
     valid_next_ridge_indices = ridge_indices[indicator_valid_next]
     valid_next_next_indices = next_ridge_indices[indicator_valid_next]
-    last_ridge_ids = None
     # propagate the ids forward along links
     while True:
-        if last_ridge_ids is not None and np.array_equal(last_ridge_ids, ridge_ids):
+        if np.all(
+                ridge_ids[(valid_next_batch_indices, valid_next_time_indices + 1, valid_next_next_indices)] ==
+                ridge_ids[(valid_next_batch_indices, valid_next_time_indices, valid_next_ridge_indices)]):
             break
-        last_ridge_ids = np.copy(ridge_ids)
-        ridge_ids[(valid_next_batch_indices, valid_next_time_indices, valid_next_next_indices)] = \
+        ridge_ids[(valid_next_batch_indices, valid_next_time_indices + 1, valid_next_next_indices)] = \
             ridge_ids[(valid_next_batch_indices, valid_next_time_indices, valid_next_ridge_indices)]
 
+    # return to the original scale axis
+    result = np.full(indicator_points.shape, -1, dtype=int)
+    result[(batch_indices, time_indices, scale_indices)] = ridge_ids[(batch_indices, time_indices, ridge_indices)]
+    return result
 
-def _compress(x, max_simultaneous_ridge_points, batch_indices, time_indices, scale_indices, ridge_indices):
+
+def _compress_scale_axis_to_ridge_axis(
+        x, max_simultaneous_ridge_points, batch_indices, time_indices, scale_indices, ridge_indices):
     c = np.full((x.shape[0], x.shape[2], max_simultaneous_ridge_points), np.nan)
     c[(batch_indices, time_indices, ridge_indices)] = x[(batch_indices, scale_indices, time_indices)]
     return c
 
 
-def _ridge_interpolate(x_list, indices, ridge_quantity, morse_wavelet=None, mu=None):
+def _ridge_interpolate(x_list, indices, ridge_quantity, morse_wavelet=None, mu=None, keep_shapes=False):
 
     is_single_x = not isinstance(x_list, (list, tuple))
     if is_single_x:
@@ -294,25 +543,26 @@ def _ridge_interpolate(x_list, indices, ridge_quantity, morse_wavelet=None, mu=N
             x_ridge_minus.append(x[(batch_indices, scale_indices - 1, time_indices)])
 
     interpolated_x = list()
-    for xrm, xr, xrp in zip(x_ridge_minus, x_ridge, x_ridge_plus):
+    for xrm, xr, xrp, x in zip(x_ridge_minus, x_ridge, x_ridge_plus, x_list):
+
+        s = np.reshape(scale_indices, (-1,) + (1,) * (len(xr.shape) - 1))
+
         interpolated_x.append(quadratic_interpolate(
-            scale_indices - 1, scale_indices, scale_indices + 1, xrm, xr, xrp, interpolated_scales))
+            s - 1, s, s + 1, xrm, xr, xrp, interpolated_scales))
 
         interpolated_x[-1][indicator_interpolation_fail] = linear_interpolate(
-            scale_indices[indicator_interpolation_fail] - 1,
-            scale_indices[indicator_interpolation_fail] + 1,
+            s[indicator_interpolation_fail] - 1,
+            s[indicator_interpolation_fail] + 1,
             xrm[indicator_interpolation_fail],
             xrp[indicator_interpolation_fail],
             interpolated_scales[indicator_interpolation_fail])
+
+        if keep_shapes:
+            z = np.full_like(x, np.nan)
+            z[(batch_indices, scale_indices, time_indices)] = interpolated_x[-1]
+            interpolated_x[-1] = z
 
     if is_single_x:
         interpolated_x = interpolated_x[0]
 
     return interpolated_x
-
-
-def _ridge_len(frequencies, dt=1, ridge_ids=None):
-    if ridge_ids is None:
-        ridge_ids = np.cumsum(np.isnan(np.roll(frequencies, -1, -1)), -1)
-
-    result = np.full_like(frequencies, np.nan)
