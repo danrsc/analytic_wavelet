@@ -3,6 +3,7 @@ import numpy as np
 import scipy.special
 from scipy.fftpack import ifft, fft
 from scipy.interpolate import interp1d
+from scipy.special import eval_genlaguerre
 import warnings
 
 
@@ -18,8 +19,9 @@ __all__ = [
 class GeneralizedMorseWavelet:
 
     def __init__(self, gamma, beta, is_bandpass_normalized=True):
-        self._gamma = gamma
-        self._beta = beta
+        # use broadcasting rules to make gamma and beta the same shape
+        self._gamma = np.zeros_like(beta) + gamma
+        self._beta = np.zeros_like(gamma) + beta
         self._is_bandpass_normalized = is_bandpass_normalized
 
     @staticmethod
@@ -68,15 +70,12 @@ class GeneralizedMorseWavelet:
         """
         The frequency at which the wavelet magnitude is maximized, energy is maximized at the same frequency
         """
-        if not np.isscalar(self.beta):
-            with warnings.catch_warnings():
-                warnings.filterwarnings('ignore', category=RuntimeWarning)
-                result = np.exp((1 / self.gamma) * (np.log(self.beta) - np.log(self.gamma)))
-            return np.where(self.beta == 0, np.power(np.log(2), 1 / self.gamma), result)
-        elif self.beta == 0:
-            return np.power(np.log(2), 1 / self.gamma)
-        else:
-            return np.exp((1 / self.gamma) * (np.log(self.beta) - np.log(self.gamma)))
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            return np.where(
+                self.beta == 0,
+                np.power(np.log(2), 1 / self.gamma),
+                np.exp((1 / self.gamma) * (np.log(self.beta) - np.log(self.gamma))))
 
     def energy_frequency(self):
         """
@@ -99,16 +98,82 @@ class GeneralizedMorseWavelet:
         _, frequency_cumulants = self.frequency_domain_cumulants(3)
         return frequency_cumulants[3] / np.sqrt(np.power(frequency_cumulants[2], 3))
 
+    def heisenberg_box(self):
+        # use broadcasting rules to guarantee the shapes work
+        beta = np.where(self.beta == 1, 1 + 1e-10, self.beta)
+        beta = np.where(beta < 0.5, np.nan, beta)
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            log_sigma_freq_1 = ((2 / self.gamma) * np.log(self.gamma / (2 * beta))
+                                + scipy.special.gammaln((2 * beta + 1 + 2) / self.gamma)
+                                - scipy.special.gammaln((2 * beta + 1) / self.gamma))
+            log_sigma_freq_2 = ((2 / self.gamma) * np.log(self.gamma / (2 * beta))
+                                + 2 * scipy.special.gammaln((2 * beta + 2) / self.gamma)
+                                - 2 * scipy.special.gammaln((2 * beta + 1) / self.gamma))
+
+            sigma_freq = np.sqrt(np.exp(log_sigma_freq_1) - np.exp(log_sigma_freq_2))
+
+            def _log_a(g, b):
+                return (b / g) * (1 + np.log(g) - np.log(b))
+
+            ra = (2 * _log_a(self.gamma, beta)
+                  - 2 * _log_a(self.gamma, beta - 1)
+                  + _log_a(self.gamma, 2 * (beta - 1))
+                  - _log_a(self.gamma, 2 * beta))
+            rb = (2 * _log_a(self.gamma, beta)
+                  - 2 * _log_a(self.gamma, beta - 1 + self.gamma)
+                  + _log_a(self.gamma, 2 * (beta - 1 + self.gamma))
+                  - _log_a(self.gamma, 2 * beta))
+            rc = (2 * _log_a(self.gamma, beta)
+                  - 2 * _log_a(self.gamma, beta - 1 + self.gamma / 2)
+                  + _log_a(self.gamma, 2 * (beta - 1 + self.gamma / 2))
+                  - _log_a(self.gamma, 2 * beta))
+
+            log_sigma_2a = (ra
+                            + (2 / self.gamma) * np.log((beta / self.gamma))
+                            + 2 * np.log(beta)
+                            + scipy.special.gammaln((2 * (beta - 1) + 1) / self.gamma)
+                            - scipy.special.gammaln((2 * beta + 1) / self.gamma))
+            log_sigma_2b = (rb
+                            + (2 / self.gamma) * np.log((beta / self.gamma))
+                            + 2 * np.log(self.gamma)
+                            + scipy.special.gammaln((2 * (beta - 1 + self.gamma) + 1) / self.gamma)
+                            - scipy.special.gammaln((2 * beta + 1) / self.gamma))
+            log_sigma_2c = (rc
+                            + (2 / self.gamma) * np.log(beta / self.gamma)
+                            + np.log(2) + np.log(beta) + np.log(self.gamma)
+                            + scipy.special.gammaln((2 * (beta - 1 + self.gamma / 2) + 1) / self.gamma)
+                            - scipy.special.gammaln((2 * beta + 1) / self.gamma))
+
+            sigma_time = np.sqrt(np.exp(log_sigma_2a) + np.exp(log_sigma_2b) - np.exp(log_sigma_2c))
+            sigma_time = np.where(np.isnan(beta), np.nan, sigma_time)
+            sigma_time = np.real(sigma_time)
+            sigma_freq = np.real(sigma_freq)
+
+            area = sigma_time * sigma_freq
+
+        return area, sigma_time, sigma_freq
+
+    # def area_of_concentration(self, c):
+    #     r = ((2 * self.beta) + 1) / self.gamma
+    #     return (np.pi * (c - 1) * scipy.special.gamma(r + 1 - (1 / self.gamma))
+    #             * scipy.special.gamma(r + (1 / self.gamma)) / (self.gamma * scipy.special.gamma(r) ** 2))
+
     def log_spaced_frequencies(self, num_timepoints, high=None, low=None, density=4):
         if high is None:
             high = (0.1, np.pi)
         if low is None:
             low = (5, num_timepoints)
-        if not np.isscalar(high):
-            high = min(high[1], self._high_frequency_cutoff(high[0]))
-        if not np.isscalar(low):
+        if isinstance(high, (tuple, list)):
+            if len(high) != 2:
+                raise ValueError('Unexpected argument for high')
+            high = np.minimum(high[1], self._high_frequency_cutoff(high[0]))
+        if isinstance(low, (tuple, list)):
+            if len(low) != 2 and len(low) != 3:
+                raise ValueError('Unexpected argument for low')
             min_low = low[2] if len(low) > 2 else 0
-            low = max(min_low, self._low_frequency_cutoff(low[0], low[1]))
+            low = np.maximum(min_low, self._low_frequency_cutoff(low[0], low[1]))
         r = 1 + (1 / density * self.time_domain_width())
         n = np.floor(np.log(high / low) / np.log(r))
         return high * np.ones(n + 1) / np.power(r, np.arange(n))
@@ -118,12 +183,12 @@ class GeneralizedMorseWavelet:
         peak_frequency = self.peak_frequency()
         if not np.isscalar(peak_frequency):
             peak_frequency = np.expand_dims(peak_frequency, -1)
-        # shape_gamma + (10000,)
+        # self.gamma.shape + (10000,)
         omega = peak_frequency * np.pi / omega_high
         ln_psi_1 = (self.beta / self.gamma) * np.log((np.exp(1) * self.gamma) / self.beta)
         beta, gamma = self.beta, self.gamma
         if not np.isscalar(self.beta):
-            beta, gamma = np.expand_dims(self.beta, -1), np.expand_dims(self.beta, -1)
+            beta, gamma = np.expand_dims(self.beta, -1), np.expand_dims(self.gamma, -1)
         ln_psi_2 = beta * np.log(omega) - np.power(omega, gamma)
         ln_psi = ln_psi_1 + ln_psi_2
         indices = np.tile(
@@ -132,14 +197,14 @@ class GeneralizedMorseWavelet:
         indices = np.where(np.log(eta) - ln_psi < 0, indices, np.nan)
         indices = np.nanmin(indices, axis=-1)
         f = np.reshape(omega_high[np.reshape(indices, -1)], indices.shape)
-        if np.isscalar(self.gamma):
+        if np.isscalar(gamma):
             return f.item()
         return f
 
     def _low_frequency_cutoff(self, r, num_timepoints):
         return (2 * np.sqrt(2) * self.time_domain_width() * r) / num_timepoints
 
-    def amplitude(self, k=1):
+    def amplitude(self, orthogonal_family_order=1):
         if self.is_bandpass_normalized:
             if not np.isscalar(self.beta):
                 om = self.peak_frequency()
@@ -156,7 +221,9 @@ class GeneralizedMorseWavelet:
             r = (2 * self.beta + 1) / self.gamma
             result = np.power(
                 2 * np.pi * self.gamma * np.power(2, r)
-                * np.exp(scipy.special.gammaln(k) - scipy.special.gammaln(k + r - 1)),
+                * np.exp(
+                    scipy.special.gammaln(orthogonal_family_order)
+                    - scipy.special.gammaln(orthogonal_family_order + r - 1)),
                 1 / 2)
         return result
 
@@ -198,113 +265,130 @@ class GeneralizedMorseWavelet:
         return moments, GeneralizedMorseWavelet._moments_to_cumulants(moments)
 
     def make_wavelet(self, num_timepoints, scale_frequencies, num_orthogonal_family_members=1):
-        fo = self.peak_frequency()
-        # (freq, 1)
-        fact = np.expand_dims(np.abs(scale_frequencies) / fo, 1)
-        # omega is (freq, time)
-        omega = np.expand_dims(2 * np.pi * np.linspace(0, 1 - (1 / num_timepoints), num_timepoints), 0) / fact
-        if self.is_bandpass_normalized:
-            if self.beta == 0:
-                psi_zero = np.exp(-np.power(omega, self.gamma))
+
+        scale_frequencies = np.asarray(scale_frequencies)
+
+        if len(scale_frequencies.shape) > 1:
+            raise ValueError('scale frequencies must be at most 1d')
+
+        if np.isscalar(scale_frequencies):
+            scale_frequencies = np.expand_dims(scale_frequencies, 0)
+
+        fo = np.reshape(self.peak_frequency(), self.gamma.shape + (1, 1))
+        gamma = np.reshape(self.gamma, self.gamma.shape + (1, 1))
+        beta = np.reshape(self.beta, self.beta.shape + (1, 1))
+
+        # ([1, ..., 1,] freq, 1)
+        scale_frequencies_reshaped = np.reshape(scale_frequencies, (1,) * (len(fo.shape) - 2) + (-1, 1))
+        # fo.shape + (freq, 1)
+        fact = np.abs(scale_frequencies_reshaped) / fo
+        omega = 2 * np.pi * np.linspace(0, 1 - (1 / num_timepoints), num_timepoints)
+        # fo.shape + (freq, time)
+        omega = np.reshape(omega, (1,) * (len(fact.shape) - 1) + (-1,)) / fact
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            if self.is_bandpass_normalized:
+                psi_zero = np.where(
+                    beta == 0,
+                    2 * np.exp(-omega ** gamma),
+                    2 * np.exp(-beta * np.log(fo) + fo ** gamma + beta * np.log(omega) - omega ** gamma))
             else:
-                psi_zero = np.exp(self.beta * np.log(omega) - np.power(omega, self.gamma))
-        else:
-            if self.beta == 0:
-                psi_zero = 2 * np.exp(-np.power(omega, self.gamma))
-            else:
-                psi_zero = 2 * np.exp(
-                    -self.beta * np.log(fo)
-                    + np.power(fo, self.gamma)
-                    + np.power(self.beta, np.log(omega) - np.power(omega, self.gamma)))
-        # psi_zero is (freq, time)
-        psi_zero[:, 0] = 1 / 2 * psi_zero[:, 0]
+                psi_zero = np.where(
+                    beta == 0,
+                    np.exp(-omega ** gamma),
+                    np.exp(beta * np.log(omega) - omega ** gamma))
+
+        # psi_zero shape is fo.shape + (freq, time)
+        psi_zero[..., 0] = 1 / 2 * psi_zero[..., 0]
         psi_zero = np.where(np.isnan(psi_zero), 0, psi_zero)
+
         psi_f = self._first_family(fact, num_timepoints, num_orthogonal_family_members, omega, psi_zero)
         psi_f = np.where(np.isinf(psi_f), 0, psi_f)
-        omega = np.expand_dims(omega, 0)
-        fact = np.expand_dims(fact, 0)
+        if len(psi_f.shape) > len(omega.shape):
+            # add the family-order axis
+            omega = np.expand_dims(omega, -3)
+            fact = np.expand_dims(fact, -3)
+
         psi = ifft(psi_f * rotate(omega * (num_timepoints + 1) / 2 * fact))
 
         indicator_neg_sf = scale_frequencies < 0
 
-        psi[:, indicator_neg_sf, :] = np.conj(psi[:, indicator_neg_sf, :])
-        psi_f[:, indicator_neg_sf, 1:] = np.flip(psi_f[:, indicator_neg_sf, 1:], axis=2)
-
-        if num_orthogonal_family_members == 1:
-            psi = np.squeeze(psi, axis=0)
-            psi_f = np.squeeze(psi_f, axis=0)
+        psi[..., indicator_neg_sf, :] = np.conj(psi[..., indicator_neg_sf, :])
+        psi_f[..., indicator_neg_sf, 1:] = np.flip(psi_f[..., indicator_neg_sf, 1:], axis=-1)
 
         return psi, psi_f
 
     def _first_family(self, fact, num_timepoints, num_orthogonal_family_members, omega, psi_zero):
-        r = (2 * self.beta + 1) / self.gamma
+        beta = np.reshape(self.beta, self.beta.shape + (1, 1))
+        gamma = np.reshape(self.gamma, self.gamma.shape + (1, 1))
+        r = (2 * beta + 1) / gamma
         c = r - 1
-        # (freq, time)
-        ell = np.zeros_like(omega)
+
+        # ([1, ..., 1,] freq, time)
+        laguerre = np.zeros_like(omega)
         indices = np.arange(int(np.ceil(num_timepoints / 2)))
-        # (wavelet, freq, time)
-        psi_f = np.zeros((num_orthogonal_family_members, psi_zero.shape[0], psi_zero.shape[1]), dtype=psi_zero.dtype)
+        # (wavelet, ..., freq, time)
+        psi_f = np.zeros(((num_orthogonal_family_members,) + psi_zero.shape), dtype=psi_zero.dtype)
+
         for k in range(num_orthogonal_family_members):
             if self.is_bandpass_normalized:
-                if self.beta == 0:
-                    coeff = 1
-                else:
-                    coeff = np.sqrt(
-                        np.exp(scipy.special.gammaln(r) + scipy.special.gammaln(k + 1) - scipy.special.gammaln(k + r)))
+                coeff = np.where(
+                    beta == 0,
+                    1,
+                    np.sqrt(
+                        np.exp(scipy.special.gammaln(r) + scipy.special.gammaln(k + 1) - scipy.special.gammaln(k + r))))
             else:
                 # (freq, time)
                 coeff = np.sqrt(1 / fact) * self.amplitude(k + 1)
-            ell[indices] = GeneralizedMorseWavelet._laguerre(2 * np.power(omega[:, indices], self.gamma), k, c)
-            psi_f[k] = coeff * psi_zero * ell
+            laguerre[..., indices] = eval_genlaguerre(k, c, 2 * np.power(omega[..., indices], gamma))
+            psi_f[k] = coeff * psi_zero * laguerre
+        # either eliminate the family-order axis or move the family-order axis to -3
+        if num_orthogonal_family_members == 1:
+            psi_f = np.squeeze(psi_f, 0)
+        else:
+            psi_f = np.moveaxis(psi_f, 0, -3)
+        # (..., [wavelet,], freq, time)
         return psi_f
 
-    @staticmethod
-    def _laguerre(x, k, c):  # probably could replace by scipy.special.genlaguerre
-        y = np.zeros_like(x)
-        for m in range(k + 1):
-            fact = np.exp(
-                scipy.special.gammaln(k + c + 1) - scipy.special.gammaln(c + m + 1) - scipy.special.gammaln(k - m + 1))
-            y += np.power(-1, m) * fact * np.power(x, m) / scipy.special.gamma(m + 1)
-        return y
-
-    def zeta(self, mu):
+    def zeta(self, beta_2):
         """
         The maximum of the Morse wavelet transform of another wavelet
         """
         if self.is_bandpass_normalized:
-            numerator = (self.beta / (mu + 1)) ** (self.beta / self.gamma)
-            denominator = ((self.beta / (mu + 1)) + 1) ** ((self.beta + mu + 1) / self.gamma)
+            numerator = (self.beta / (beta_2 + 1)) ** (self.beta / self.gamma)
+            denominator = ((self.beta / (beta_2 + 1)) + 1) ** ((self.beta + beta_2 + 1) / self.gamma)
         else:
-            numerator = ((self.beta + 1 / 2) / (mu + 1 / 2)) ** ((self.beta + 1 / 2) / self.gamma)
-            denominator = ((self.beta + 1 / 2) / (mu + 1 / 2) + 1) ** ((self.beta + mu + 1) / self.gamma)
-        mu_morse = GeneralizedMorseWavelet.replace(self, beta=mu)
+            numerator = ((self.beta + 1 / 2) / (beta_2 + 1 / 2)) ** ((self.beta + 1 / 2) / self.gamma)
+            denominator = ((self.beta + 1 / 2) / (beta_2 + 1 / 2) + 1) ** ((self.beta + beta_2 + 1) / self.gamma)
+        mu_morse = GeneralizedMorseWavelet.replace(self, beta=beta_2)
         return ((1 / (2 * np.pi * self.gamma))
                 * self.amplitude()
                 * mu_morse.amplitude()
-                * scipy.special.gamma((self.beta + mu + 1) / self.gamma)
+                * scipy.special.gamma((self.beta + beta_2 + 1) / self.gamma)
                 * (numerator / denominator))
 
-    def maxima_parameters(self, maxima_values, maxima_scale_frequencies, mu):
+    def maxima_parameters(self, maxima_values, maxima_scale_frequencies, event_beta):
         """
         Estimates the parameters of the events corresponding to the maxima
         Args:
             maxima_values: output from transform_maxima
             maxima_scale_frequencies: output from transform_maxima
-            mu: ?
+            event_beta: The beta parameter of the event wavelets
 
         Returns:
             coefficients (complex), scales, scale_frequencies
         """
-        mu_morse = GeneralizedMorseWavelet.replace(self, beta=mu)
+        mu_morse = GeneralizedMorseWavelet.replace(self, beta=event_beta)
         if self.is_bandpass_normalized:
             f_hat = (maxima_scale_frequencies
                      * (mu_morse.peak_frequency() / self.peak_frequency())
-                     * (self.beta / (mu + 1)) ** (1 / self.gamma))
+                     * (self.beta / (event_beta + 1)) ** (1 / self.gamma))
         else:
             f_hat = (maxima_scale_frequencies
                      * (mu_morse.peak_frequency() / self.peak_frequency())
-                     * ((self.beta + 1 / 2) / (mu + 1 / 2)) ** (1 / self.gamma))
-        c_hat = 2 * maxima_values / self.zeta(mu)
+                     * ((self.beta + 1 / 2) / (event_beta + 1 / 2)) ** (1 / self.gamma))
+        c_hat = 2 * maxima_values / self.zeta(event_beta)
         return c_hat, mu_morse.peak_frequency() / f_hat, f_hat
 
 
@@ -315,7 +399,7 @@ def _rotate_main_angle(x):
 
 def rotate(x):
     x = _rotate_main_angle(x)
-    edge_cases = np.full_like(x, np.nan)
+    edge_cases = np.full_like(1j * x, np.nan)
     edge_cases[x == np.pi / 2] = 1j
     edge_cases[x == -np.pi / 2] = -1j
     edge_cases[np.logical_or(x == np.pi, x == -np.pi)] = -1

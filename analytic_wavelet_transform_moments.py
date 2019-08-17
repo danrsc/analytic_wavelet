@@ -12,40 +12,20 @@ __all__ = [
 
 
 def _expand_from_1d(arr, ndim, axis):
+    if axis < 0:
+        axis = ndim + axis
     return np.reshape(np.asarray(arr), (1,) * axis + (len(arr),) + (1,) * (ndim - axis - 1))
 
 
-def _central_diff_part(dest, indices, src, axis):
-    np.put_along_axis(
-        dest,
-        # shift the indices up by 1 to leave 0 open
-        _expand_from_1d(indices[:-1] + 1, dest.ndim, axis),
-        np.diff(np.take(src, indices, axis)) / 2,
-        axis)
-
-
 def first_central_diff(x, padding='endpoint', axis=-1):
-    i1 = np.arange(0, x.shape[axis], 2)
-    i2 = i1 + 1
-    if i2[-1] == x.shape[axis]:
-        i2 = i2[:-1]
-    y = np.zeros_like(x)
-    _central_diff_part(y, i1, x, axis)
-    _central_diff_part(y, i2, x, axis)
-    if padding == 'endpoint':
-        dx_start = np.take(x, 1, axis) - np.take(x, 0, axis)
-        dx_end = np.take(x, -1, axis) - np.take(x, -2, axis)
-    elif padding == 'nan':
-        dx_start = np.nan
-        dx_end = np.nan
-    elif padding == 'periodic':
-        dx_start = (np.take(x, 1, axis) - np.take(x, 0, axis)) / 2 + (np.take(x, 0, axis) - np.take(x, -1, axis)) / 2
-        dx_end = (np.take(x, -1, axis) - np.take(x, -2, axis)) / 2 + (np.take(x, 0, axis) - np.take(x, -1, axis)) / 2
-    else:
-        raise ValueError('Uknown padding type: {}'.format(padding))
-    np.put_along_axis(y, _expand_from_1d([0], y.ndim, axis), dx_start, axis)
-    np.put_along_axis(y, _expand_from_1d([y.shape[axis] - 1], y.ndim, axis), dx_end, axis)
-    return y
+    edge_order = 1 if (padding == 'endpoint' or padding == 'nan') else 2 if padding == 'periodic' else None
+    if edge_order is None:
+        raise ValueError('Unknown padding type: {}'.format(padding))
+    x = np.gradient(x, edge_order=edge_order, axis=axis)
+    if padding == 'nan':
+        np.put_along_axis(x, _expand_from_1d([0], x.ndim, axis), np.nan, axis)
+        np.put_along_axis(x, _expand_from_1d([x.shape[axis] - 1], x.ndim, axis), np.nan, axis)
+    return x
 
 
 def _bell_polynomial(*x):
