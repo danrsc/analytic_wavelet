@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from typing import Optional, Tuple
 import numpy as np
 from .analytic_wavelet_transform_moments import instantaneous_frequency, amplitude, first_central_diff
 from .analytic_wavelet import rotate, quadratic_interpolate, linear_interpolate, GeneralizedMorseWavelet
@@ -52,6 +54,50 @@ def dense_ridge(x, original_shape, ridge_indices, fill_value=np.nan):
     return result
 
 
+def ridge_compress(x_list, original_shape, ridge_indices, ridge_ids, scale_axis=-2, fill_value=np.nan):
+    """
+    Conceptually, this maps each item in x_list to a dense representation, and then replaces the scale
+        axis with a ridge id axis, so that each ridge lives on a single component of the ridge axis
+        and ridge_ids map to indices in tha ridge axis.
+    Args:
+        x_list: The values on the ridge to collapse. If a list, then the first item in the list must be
+            the wavelet coefficients. If an array, then the array is the wavelet coefficients. All values should
+            be 1d arrays output by ridges
+        original_shape: The shape of the wavelet coefficients array passed in to ridges
+        ridge_indices: The coordinates of the wavelet coefficients, as output by ridges
+        ridge_ids: The ids of the ridges, as output by ridges
+        scale_axis: Which axis in the coordinates is the scale axis
+        fill_value: What value to use in the result for coordinates which are not on the ridge
+    Returns:
+        compressed_dense_x: The compressed dense representation of x with shape:
+                original_shape[:scale_axis] + num_ridges + original_shape[scale_axis + 1:]
+            If x_list is a list, then the result will be a list with each item having that shape.
+    """
+    is_singleton = not isinstance(x_list, (list, tuple))
+    if is_singleton:
+        x_list = [x_list]
+    if len(ridge_indices) != len(original_shape):
+        raise ValueError('Shape mismatch between ridge_indices (len {}) and original_shape (len {})'.format(
+            len(ridge_indices), len(original_shape)))
+    ridge_indices = ridge_indices[:scale_axis] + ridge_indices[scale_axis + 1:]
+    original_shape = original_shape[:scale_axis] + original_shape[scale_axis + 1:]
+    dense_ridges = list()
+    for _ in x_list:
+        dense_ridges.append(list())
+    for ridge_id in np.unique(ridge_ids):
+        indicator_ridge_id = ridge_ids == ridge_id
+        ridge_id_indices = tuple(ri[indicator_ridge_id] for ri in ridge_indices)
+        for idx, x in enumerate(x_list):
+            dense_ridges[idx].append(np.expand_dims(
+                dense_ridge(x[indicator_ridge_id], original_shape, ridge_id_indices, fill_value=fill_value),
+                scale_axis))
+    for idx in range(len(dense_ridges)):
+        dense_ridges[idx] = np.concatenate(dense_ridges[idx], axis=scale_axis)
+    if is_singleton:
+        return dense_ridges[0]
+    return dense_ridges
+
+
 def ridge_collapse(x_list, original_shape, ridge_indices, scale_axis=-2):
     """
     Collapses the multiple ridges output by ridges into a single ridge by combining together ridges which exist
@@ -89,6 +135,36 @@ def ridge_collapse(x_list, original_shape, ridge_indices, scale_axis=-2):
     if is_singleton:
         result = result[0]
     return result, new_indices
+
+
+@dataclass
+class RidgesResult:
+    """
+    Result returned from a call to ridges
+    Fields:
+        ridge_values: A 1d array of interpolated values of x for all points on a ridge
+        indices: A tuple of indices giving coordinates of ridge points in x. If z is an array of zeros
+            with the same shape as x, then z[indices] = ridge_values would have interpolated values of
+            x wherever x has a ridge point and zero everywhere else.
+        ridge_ids: Same shape as ridge_values, giving the id of the ridge for each ridge value
+        instantaneous_frequencies: Same shape as ridge_values. Instantaneous frequencies along the ridge
+        instantaneous_bandwidth: Same shape as ridge_values. Instantaneous bandwidth along the ridge
+        instantaneous_curvature: Same shape as ridge_values. Instantaneous curvature along the ridge
+        total_error: Same shape as ridge_values. A measure of deviation from a multivariate
+            (or univariate) oscillation. Should be << 1 if the ridge estimate is good.
+            Only returned if morse_wavelet is provided
+
+            See equation 62 in
+            Lilly and Olhede (2012), Analysis of Modulated Multivariate
+            Oscillations. IEEE Trans. Sig. Proc., 60 (2), 600--612.
+    """
+    ridge_values: np.ndarray
+    indices: Tuple[np.ndarray, ...]
+    ridge_ids: np.ndarray
+    instantaneous_frequencies: np.ndarray
+    instantaneous_bandwidth: np.ndarray
+    instantaneous_curvature: np.ndarray
+    total_error: Optional[np.ndarray] = None
 
 
 def ridges(
@@ -139,21 +215,22 @@ def ridges(
         variable_axis: If specified, then the ridge is computed jointly over this axis
 
     Returns:
-        ridge_values: A 1d array of interpolated values of x for all points on a ridge
-        indices: A tuple of indices giving coordinates of ridge points in x. If z is an array of zeros
-            with the same shape as x, then z[indices] = ridge_values would have interpolated values of
-            x wherever x has a ridge point and zero everywhere else.
-        ridge_ids: Same shape as ridge_values, giving the id of the ridge for each ridge value
-        instantaneous_frequencies: Same shape as ridge_values. Instantaneous frequencies along the ridge
-        instantaneous_bandwidth: Same shape as ridge_values. Instantaneous bandwidth along the ridge
-        instantaneous_curvature: Same shape as ridge_values. Instantaneous curvature along the ridge
-        total_error: Same shape as ridge_values. A measure of deviation from a multivariate
-            (or univariate) oscillation. Should be << 1 if the ridge estimate is good.
-            Only returned if morse_wavelet is provided
+        An instance of RidgesResult with the fields:
+            ridge_values: A 1d array of interpolated values of x for all points on a ridge
+            indices: A tuple of indices giving coordinates of ridge points in x. If z is an array of zeros
+                with the same shape as x, then z[indices] = ridge_values would have interpolated values of
+                x wherever x has a ridge point and zero everywhere else.
+            ridge_ids: Same shape as ridge_values, giving the id of the ridge for each ridge value
+            instantaneous_frequencies: Same shape as ridge_values. Instantaneous frequencies along the ridge
+            instantaneous_bandwidth: Same shape as ridge_values. Instantaneous bandwidth along the ridge
+            instantaneous_curvature: Same shape as ridge_values. Instantaneous curvature along the ridge
+            total_error: Same shape as ridge_values. A measure of deviation from a multivariate
+                (or univariate) oscillation. Should be << 1 if the ridge estimate is good.
+                Only returned if morse_wavelet is provided
 
-            See equation 62 in
-            Lilly and Olhede (2012), Analysis of Modulated Multivariate
-            Oscillations. IEEE Trans. Sig. Proc., 60 (2), 600--612.
+                See equation 62 in
+                Lilly and Olhede (2012), Analysis of Modulated Multivariate
+                Oscillations. IEEE Trans. Sig. Proc., 60 (2), 600--612.
     """
 
     if variable_axis is not None:
@@ -301,11 +378,14 @@ def ridges(
             expanded_ridge_indices = np.nonzero(expanded >= 0)
         result[idx] = expanded[expanded_ridge_indices]
 
-    ridge_ids = result[0]
-    x = result[1]
-    result = result[2:]
-
-    return [x, expanded_ridge_indices, ridge_ids] + result
+    return RidgesResult(
+        ridge_values=result[1],
+        indices=expanded_ridge_indices,
+        ridge_ids=result[0],
+        instantaneous_frequencies=result[2],
+        instantaneous_bandwidth=result[3],
+        instantaneous_curvature=result[4],
+        total_error=result[5] if len(result) > 5 else None)
 
 
 def _mask_ridges(ridge_ids, mask):
