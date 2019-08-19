@@ -48,7 +48,7 @@ def amplitude(x, variable_axis=None):
 def instantaneous_frequency(x, dt=1, diff_padding='endpoint', variable_axis=None):
     result = first_central_diff(np.unwrap(np.angle(x), axis=-1), padding=diff_padding) / dt
     if variable_axis is not None:
-        weights = np.square(x)
+        weights = np.square(np.abs(x))
         result = np.nansum(result * weights, axis=variable_axis) / np.nansum(weights, axis=variable_axis)
     return result
 
@@ -59,7 +59,7 @@ def instantaneous_bandwidth(x, dt=1, diff_padding='endpoint', variable_axis=None
         frequency = instantaneous_frequency(x, dt=dt, diff_padding=diff_padding)
         multi_frequency = instantaneous_frequency(x, dt=dt, diff_padding=diff_padding, variable_axis=variable_axis)
         multi_frequency = np.expand_dims(multi_frequency, variable_axis)
-        weights = np.square(x)
+        weights = np.square(np.abs(x))
         result = (np.nansum(np.abs(result + 1j * (frequency - multi_frequency)) ** 2 * weights, axis=variable_axis)
                   / np.nansum(weights, axis=variable_axis))
     return result
@@ -71,7 +71,7 @@ def instantaneous_curvature(x, dt=1, diff_padding='endpoint', variable_axis=None
         _, frequency, bandwidth, curvature = moments
         multi_frequency = instantaneous_frequency(x, dt=dt, diff_padding=diff_padding, variable_axis=variable_axis)
         np.expand_dims(multi_frequency, variable_axis)
-        weights = np.square(x)
+        weights = np.square(np.abs(x))
         temp = np.abs(
             curvature + 2 * 1j * bandwidth * (frequency - multi_frequency) - (frequency - multi_frequency) ** 2) ** 2
         return np.sqrt(np.nansum(temp * weights, variable_axis) / np.nansum(weights))

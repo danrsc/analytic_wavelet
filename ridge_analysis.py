@@ -81,7 +81,7 @@ def ridge_collapse(x_list, original_shape, ridge_indices, scale_axis=-2):
         item = dense_ridge(item, original_shape, ridge_indices, fill_value=0)
         if idx == 0:
             if len(x_list) > 1:
-                power = np.square(item)
+                power = np.square(np.abs(item))
             c = np.sum(item, axis=scale_axis)
         else:
             c = np.sum(item * power, axis=scale_axis) / np.sum(power, axis=scale_axis)
@@ -256,9 +256,9 @@ def ridges(
 
     if len(x.shape) == 2:
         instantaneous_frequencies = np.expand_dims(instantaneous_frequencies, 1)
-        l2 = np.sqrt(np.sum(np.square(x), axis=1, keepdims=True))
+        l2 = np.sqrt(np.sum(np.square(np.abs(x)), axis=1, keepdims=True))
     else:
-        l2 = np.sqrt(np.square(x))
+        l2 = np.sqrt(np.square(np.abs(x)))
 
     bandwidth = (x1 - 1j * instantaneous_frequencies * x) / l2
     curvature = (x2 - 2 * 1j * instantaneous_frequencies * x1 - instantaneous_frequencies ** 2 * x) / l2
@@ -266,9 +266,10 @@ def ridges(
     result = [ridge_ids, x, instantaneous_frequencies, bandwidth, curvature]
 
     if morse_wavelet is not None:
-        curvature_l2 = np.sqrt(np.sum(np.square(curvature), axis=2, keepdims=True)) \
-            if len(curvature.shape) == 2 else np.sqrt(np.square(curvature))
-        total_err = 1 / 2 * np.square(morse_wavelet.time_domain_width() / instantaneous_frequencies) * curvature_l2
+        curvature_l2 = np.sqrt(np.sum(np.square(np.abs(curvature)), axis=2, keepdims=True)) \
+            if len(curvature.shape) == 2 else np.sqrt(np.square(np.abs(curvature)))
+        total_err = (1 / 2 * np.square(np.abs(morse_wavelet.time_domain_width() / instantaneous_frequencies))
+                     * curvature_l2)
         result = result + [total_err]
 
     expanded_shape = ridge_ids.shape if len(x.shape) == 1 else ridge_ids.shape + (x.shape[1],)

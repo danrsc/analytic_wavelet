@@ -10,6 +10,10 @@ import warnings
 __all__ = [
     'GeneralizedMorseWavelet',
     'rotate',
+    'masked_detrend',
+    'make_unpad_slices',
+    'unpad',
+    'to_frequency_domain_wavelet',
     'analytic_wavelet_transform',
     'transform_maxima',
     'quadratic_interpolate',
@@ -54,6 +58,13 @@ class GeneralizedMorseWavelet:
         the central wavelet window as measured by the standard deviation of the demodulated wavelet
         """
         return np.sqrt(self.beta * self.gamma)
+
+    def footprint(self, scale_frequency, standard_widths=4):
+        # see Appendix B of Lilly 2017
+        # "Element Analysis: a wavelet based method for analyzing time-localized events in noisy time-series"
+        # 2 * sqrt(2) * time_domain_width / scale_frequency is rough 4 standard deviations
+        footprint = np.sqrt(2) * standard_widths / 2 * self.time_domain_width() / scale_frequency
+        return np.ceil(footprint).astype(int)
 
     def demodulated_skewness_imag(self):
         """
@@ -160,23 +171,82 @@ class GeneralizedMorseWavelet:
     #     return (np.pi * (c - 1) * scipy.special.gamma(r + 1 - (1 / self.gamma))
     #             * scipy.special.gamma(r + (1 / self.gamma)) / (self.gamma * scipy.special.gamma(r) ** 2))
 
-    def log_spaced_frequencies(self, num_timepoints, high=None, low=None, density=4):
-        if high is None:
-            high = (0.1, np.pi)
-        if low is None:
-            low = (5, num_timepoints)
-        if isinstance(high, (tuple, list)):
-            if len(high) != 2:
-                raise ValueError('Unexpected argument for high')
-            high = np.minimum(high[1], self._high_frequency_cutoff(high[0]))
-        if isinstance(low, (tuple, list)):
-            if len(low) != 2 and len(low) != 3:
-                raise ValueError('Unexpected argument for low')
-            min_low = low[2] if len(low) > 2 else 0
-            low = np.maximum(min_low, self._low_frequency_cutoff(low[0], low[1]))
-        r = 1 + (1 / density * self.time_domain_width())
-        n = np.floor(np.log(high / low) / np.log(r))
-        return high * np.ones(n + 1) / np.power(r, np.arange(n))
+    def log_spaced_frequencies(
+            self,
+            num_timepoints=None,
+            high=None,
+            low=None,
+            nyquist_overlap=None,
+            endpoint_overlap=None,
+            density=4):
+        """
+        Returns log-spaced frequencies which can be used as input to make_wavelet. Frequencies are returned
+        in descending order.
+        Args:
+            num_timepoints: The largest window size to consider. If not specified, low must be provided. If
+                endpoint_overlap is specified, num_timepoints must also be specified
+            high: An explicit high frequency cutoff. If both high and nyquist_overlap are provided, then the cutoff
+                frequency is set to the minimum of high and the cutoff determined by the nyquist_overlap parameter.
+                If neither high or nyquist_overlap is provided, then the function behaves as though
+                nyquist_overlap=0.1 and high=np.pi
+            low: An explicit low frequency cutoff. If both low and endpoint_overlap are provided, then the cutoff
+                frequency is set to the maximum of low and cutoff determined by the endpoint_overlap parameter.
+                If neither low or endpoint_overlap is provided, then the function behaves as though
+                endpoint_overlap=5 and low=num_timepoints.
+            nyquist_overlap: gives the ratio in [0, 1] of a frequency-domain wavelet at the Nyquist
+                frequency to its peak value. The cutoff is the highest frequency which has a ratio no larger than
+                this value. If both high and nyquist_overlap are provided, then the cutoff
+                frequency is set to the minimum of high and the cutoff determined by the nyquist_overlap parameter.
+                If neither high or nyquist_overlap is provided, then the function behaves as though
+                nyquist_overlap=0.1 and high=np.pi
+            endpoint_overlap: If provided, the lowest frequency wavelet will reach endpoint_overlap times its central
+                window width at the ends of the time-window. If both low and endpoint_overlap are provided, then the cutoff
+                frequency is set to the maximum of low and cutoff determined by the endpoint_overlap parameter.
+                If neither low or endpoint_overlap is provided, then the function behaves as though
+                endpoint_overlap=5 and low=num_timepoints.
+            density: Controls the amount of overlap in the frequency domain. When density == 1, the peak of one
+                wavelet is located at the half-power points of the adjacent wavelet. density == 4 (the default) means
+                that four other wavelets will occur between the peak of one wavelet and its half-power point.
+
+        Returns:
+            frequencies: An array of log-spaced frequencies in the range determined according to the
+                parameters.
+        """
+        with warnings.catch_warnings():
+            warnings.filterwarnings('ignore', category=RuntimeWarning)
+            if high is None and nyquist_overlap is None:
+                high = np.pi
+                nyquist_overlap = 0.1
+            if low is None and endpoint_overlap is None:
+                if num_timepoints is None:
+                    raise ValueError('When low is not provided, num_timepoints must be specified.')
+                low = num_timepoints
+                endpoint_overlap = 5
+            if endpoint_overlap is not None and num_timepoints is None:
+                raise ValueError('When endpoint_overlap is set, num_timepoints must be specified.')
+
+            r = 1 + (1 / (density * self.time_domain_width()))
+
+            if nyquist_overlap is not None:
+                nyquist_high = self._high_frequency_cutoff(nyquist_overlap)
+                if high is None:
+                    high = nyquist_high
+                else:
+                    high = np.where(nyquist_high < high, nyquist_high, high)
+            if endpoint_overlap is not None:
+                endpoint_low = self._low_frequency_cutoff(r, num_timepoints)
+                if low is None:
+                    low = endpoint_low
+                else:
+                    low = np.where(endpoint_low > low, endpoint_low, low)
+
+            n = np.floor(np.log(high / low) / np.log(r)).astype(int)
+
+            if not np.isscalar(n):
+                indices = np.reshape(np.arange(np.max(n) + 1), (1,) * len(n.shape) + (np.max(n) + 1,))
+                indices = np.where(indices < np.expand_dims(n, -1), indices, np.nan)
+                return np.expand_dims(high, 1) / np.power(r, indices)
+            return high / np.power(r, np.arange(n + 1))
 
     def _high_frequency_cutoff(self, eta):
         omega_high = np.reshape(np.linspace(0, np.pi, 10000), (1,) * len(self.gamma.shape) + (-1,))
@@ -192,10 +262,10 @@ class GeneralizedMorseWavelet:
         ln_psi_2 = beta * np.log(omega) - np.power(omega, gamma)
         ln_psi = ln_psi_1 + ln_psi_2
         indices = np.tile(
-            np.reshape(
-                np.arange(ln_psi.shape[-1]), (1,) * ln_psi.shape[:-1] + ln_psi.shape[-1]), ln_psi.shape[:-1] + (1,))
-        indices = np.where(np.log(eta) - ln_psi < 0, indices, np.nan)
-        indices = np.nanmin(indices, axis=-1)
+            np.reshape(np.arange(ln_psi.shape[-1]), (1,) * (len(ln_psi.shape) - 1) + (ln_psi.shape[-1],)),
+            ln_psi.shape[:-1] + (1,))
+        indices = np.where(np.log(eta) - ln_psi <= 0, indices, np.nan)
+        indices = np.nanmin(indices, axis=-1).astype(int)
         f = np.reshape(omega_high[np.reshape(indices, -1)], indices.shape)
         if np.isscalar(gamma):
             return f.item()
@@ -407,55 +477,108 @@ def rotate(x):
     return np.where(np.isnan(edge_cases), np.exp(1j * x), edge_cases)
 
 
-def frequency_domain_from_time_domain(num_timepoints, time_domain_wavelet):
-    if time_domain_wavelet.shape[-1] < num_timepoints:
-        w = np.zeros(time_domain_wavelet.shape[:-1] + (num_timepoints,), time_domain_wavelet.dtype)
-        indices = np.arange(time_domain_wavelet.shape[-1]) + (num_timepoints - time_domain_wavelet.shape[-1]) // 2
-        w[..., indices] = time_domain_wavelet
-        time_domain_wavelet = w
-    elif time_domain_wavelet.shape[-1] > num_timepoints:
-        time_domain_wavelet = time_domain_wavelet[..., :num_timepoints.shape[1]]
-        raise ValueError('unexpected')  # original code multiplies by nan
+def to_frequency_domain_wavelet(time_domain_wavelet, num_timepoints=None):
+    """
+    Converts a time-domain wavelet to a frequency domain wavelet
+    Args:
+        time_domain_wavelet: The wavelet to convert with shape (..., time)
+        num_timepoints: If specified, the time domain wavelet is extended with 0 padding on both sides.
+            If smaller than time_domain_wavelet.shape[-1], currently an error is raised
+
+    Returns:
+        The frequency domain wavelet
+    """
+    if num_timepoints is not None:
+        if time_domain_wavelet.shape[-1] < num_timepoints:
+            padding = (num_timepoints - time_domain_wavelet.shape[-1]) // 2
+            if padding * 2 + time_domain_wavelet.shape[-1] < num_timepoints:
+                padding = (padding, padding + 1)
+            else:
+                padding = (padding, padding)
+            pad_width = (0, 0) * (len(time_domain_wavelet.shape) - 1) + padding
+            time_domain_wavelet = np.pad(time_domain_wavelet, pad_width, mode='constant')
+        elif time_domain_wavelet.shape[-1] > num_timepoints:
+            time_domain_wavelet = time_domain_wavelet[..., :num_timepoints]
+            raise ValueError('unexpected')  # original code multiplies by nan, not sure what is going on here
 
     psi_f = fft(time_domain_wavelet)
-    omega = 2 * np.pi * np.linspace(0, 1 - (1 / num_timepoints), num_timepoints)
-    omega = np.reshape(omega, (1,) * (len(time_domain_wavelet.shape) - 1) + (omega.shape[0],))
-    if num_timepoints // 2 * 2 == num_timepoints:  # is even
-        psi_f = psi_f * rotate(-omega * (num_timepoints + 1) / 2) * np.sign(np.pi - omega)
+    omega = 2 * np.pi * np.linspace(0, 1 - (1 / psi_f.shape[-1]), psi_f.shape[-1])
+    omega = np.reshape(omega, (1,) * (len(psi_f.shape) - 1) + (omega.shape[0],))
+    if psi_f.shape[-1] // 2 * 2 == psi_f.shape[-1]:  # is even
+        psi_f = psi_f * rotate(-omega * (psi_f.shape[-1] + 1) / 2) * np.sign(np.pi - omega)
     else:
-        psi_f = psi_f * rotate(-omega * (num_timepoints + 1) / 2)
+        psi_f = psi_f * rotate(-omega * (psi_f.shape[-1] + 1) / 2)
     return psi_f
 
 
 def _awt(x, psi_f, is_time_domain_wavelet_real):
-    # unitary transform normalization
-    if not np.isreal(x):
+
+    # x is (batch, time)
+    # psi_f is (..., scale, time)
+
+    # unitary transform normalization ?
+    if not np.isrealobj(x):
         x = x / np.sqrt(2)
 
     psi_f = np.conj(psi_f)
-    # -> (batch, k * scale_frequencies, time)
-    result = np.expand_dims(fft(x), 1) * np.reshape(psi_f, (1, -1, psi_f.shape[-1]))
-    # -> (batch, k, scale_frequencies, time) or (batch, scale_frequencies, time)
+    # -> (batch, k * scale_frequencies, time), where k is a stand in for additional dimensions
+    result = np.expand_dims(fft(np.where(np.isnan(x), 0, x)), 1) * np.reshape(psi_f, (1, -1, psi_f.shape[-1]))
+    # -> (batch, ..., scale_frequencies, time)
     result = np.reshape(result, (x.shape[0],) + psi_f.shape)
+    x = np.reshape(x, (x.shape[0],) + (1,) * (len(result.shape) - 2) + (x.shape[1],))
     result = ifft(result)
-    if np.isreal(x) and is_time_domain_wavelet_real and not np.isreal(result):
+    if np.isrealobj(x) and is_time_domain_wavelet_real and not np.isrealobj(result):
         result = np.real(result)
     if not np.any(np.isfinite(result)):
-        if not np.isreal(result):
+        if not np.isrealobj(result):
             result = np.inf * (1 + 1j) * np.ones_like(result)
         else:
             result = np.inf * np.ones_like(result)
-    if not np.isreal(result):
+    if not np.isrealobj(result):
         result = np.where(np.isnan(x), np.nan * (1 + 1j), result)
     else:
         result = np.where(np.isnan(x), np.nan, result)
     return result
 
 
-def analytic_wavelet_transform(x, frequency_domain_wavelet, is_time_domain_wavelet_real):
+def analytic_wavelet_transform(x, frequency_domain_wavelet, is_time_domain_wavelet_real, unpad_slices=None):
+    """
+    Computes the transform of x using frequency_domain_wavelet, a wavelet defined in the frequency_domain.
+    Args:
+        x: An array with shape (..., time)
+        frequency_domain_wavelet: An array of wavelets in the frequency domain of shape (..., time). The first N-1
+            dimensions are for multiple scales, wavelet families, etc. and need not match the shape of the first M-1
+            dimensions of x.
+        is_time_domain_wavelet_real: A boolean indicating whether the time domain form of frequency_domain_wavelet
+            is real or complex. When True, and x is real the result is coerced to real
+        unpad_slices: The result of calling make_unpad_slices(x.ndim, pad_width) with the pad_width that was used to
+            pad x. If specified, padding will be stripped from w before it is returned.
+            This is equivalent to
+                w = analytic_wavelet_transform(x, ...)
+                w = w[unpad_slices[:-1] + (slice(None),) * (w.ndim - x.ndim) + unpad_slices[-1]]
+    Returns:
+        w: Wavelet coefficients with shape x.shape[:-1] + frequency_domain_wavelet.shape[:-1] + (time,)
+    """
     x = np.asarray(x)
+    frequency_domain_wavelet = np.asarray(frequency_domain_wavelet)
+
+    if x.shape[-1] != frequency_domain_wavelet.shape[-1]:
+        raise ValueError(
+            'x and frequency_domain_wavelet must match on the time axis. '
+            'x.shape: {}, frequency_domain_wavelet.shape: {}'.format(x.shape, frequency_domain_wavelet.shape))
+
+    if unpad_slices is not None:
+        if not isinstance(unpad_slices, (tuple, list)):
+            unpad_slices = (unpad_slices,)
+        else:
+            unpad_slices = tuple(unpad_slices)
+        if len(unpad_slices) != x.ndim:
+            raise ValueError('Mismatched dimensions. Got {} unpad_slices, but x has {} axes'.format(
+                len(unpad_slices), x.ndim))
+
     x_shape = x.shape
     x = np.reshape(x, (-1, x.shape[-1]))
+
     indicator_good = np.sum(np.isfinite(x), axis=-1) > 1
     if np.sum(indicator_good) == 0:
         # make a dummy result of the correct size
@@ -464,9 +587,17 @@ def analytic_wavelet_transform(x, frequency_domain_wavelet, is_time_domain_wavel
     else:
         x = x[indicator_good]
         result_good = _awt(x, frequency_domain_wavelet, is_time_domain_wavelet_real)
-        result = np.inf * (1 + 1j) * np.zeros((x.shape[0],) + result_good.shape[1:], dtype=result_good.dtype)
+        result = np.full((x.shape[0],) + result_good.shape[1:], np.inf, dtype=result_good.dtype)
         result[indicator_good] = result_good
     result = np.reshape(result, x_shape[:-1] + result.shape[1:])
+    if unpad_slices is not None:
+        s = list(unpad_slices[:-1])
+        for _ in range(len(unpad_slices), result.ndim):
+            s.append(slice(None))
+        s.append(unpad_slices[-1])
+        s = tuple(s)
+        assert(len(s) == result.ndim)
+        result = result[s]
     return result
 
 
@@ -529,3 +660,120 @@ def linear_interpolate(t1, t2, x1, x2, t=None):
     if t is None:
         return -b / a
     return a * t + b
+
+
+# unfortunately, scipy.signal.detrend does not handle masking
+def _masked_detrend(arr, axis=-1):
+
+    to_fit = np.ma.masked_invalid(np.moveaxis(arr, axis, 0))
+    x = np.arange(len(to_fit))
+
+    shape = to_fit.shape
+    to_fit = np.reshape(to_fit, (to_fit.shape[0], -1))
+
+    # some columns might not have any data
+    indicator_can_fit = np.logical_not(np.all(to_fit.mask, axis=0))
+
+    p = np.ma.polyfit(x, to_fit[:, indicator_can_fit], deg=1)
+
+    filled_p = np.zeros((p.shape[0], len(indicator_can_fit)), p.dtype)
+    filled_p[:, indicator_can_fit] = p
+    p = filled_p
+
+    #      (1, num_columns)            (num_rows, 1)
+    lines = np.reshape(p[0], (1, -1)) * np.reshape(np.arange(len(to_fit)), (-1, 1)) + np.reshape(p[1], (1, -1))
+    lines = np.moveaxis(np.reshape(lines, shape), 0, axis)
+    return arr - lines
+
+
+def masked_detrend(arr, axis=-1):
+    if not np.isrealobj(arr):
+        return _masked_detrend(np.real(arr), axis=axis) + 1j * _masked_detrend(np.imag(arr), axis=axis)
+    return _masked_detrend(arr, axis=axis)
+
+
+def _as_pairs(x, ndim, as_index=False):
+    # copied from https://github.com/numpy/numpy/blob/v1.17.0/numpy/lib/arraypad.py
+    """
+    Broadcast `x` to an array with the shape (`ndim`, 2).
+    A helper function for `pad` that prepares and validates arguments like
+    `pad_width` for iteration in pairs.
+    Parameters
+    ----------
+    x : {None, scalar, array-like}
+        The object to broadcast to the shape (`ndim`, 2).
+    ndim : int
+        Number of pairs the broadcasted `x` will have.
+    as_index : bool, optional
+        If `x` is not None, try to round each element of `x` to an integer
+        (dtype `np.intp`) and ensure every element is positive.
+    Returns
+    -------
+    pairs : nested iterables, shape (`ndim`, 2)
+        The broadcasted version of `x`.
+    Raises
+    ------
+    ValueError
+        If `as_index` is True and `x` contains negative elements.
+        Or if `x` is not broadcastable to the shape (`ndim`, 2).
+    """
+    if x is None:
+        # Pass through None as a special case, otherwise np.round(x) fails
+        # with an AttributeError
+        return ((None, None),) * ndim
+
+    x = np.array(x)
+    if as_index:
+        x = np.round(x).astype(np.intp, copy=False)
+
+    if x.ndim < 3:
+        # Optimization: Possibly use faster paths for cases where `x` has
+        # only 1 or 2 elements. `np.broadcast_to` could handle these as well
+        # but is currently slower
+
+        if x.size == 1:
+            # x was supplied as a single value
+            x = x.ravel()  # Ensure x[0] works for x.ndim == 0, 1, 2
+            if as_index and x < 0:
+                raise ValueError("index can't contain negative values")
+            return ((x[0], x[0]),) * ndim
+
+        if x.size == 2 and x.shape != (2, 1):
+            # x was supplied with a single value for each side
+            # but except case when each dimension has a single value
+            # which should be broadcasted to a pair,
+            # e.g. [[1], [2]] -> [[1, 1], [2, 2]] not [[1, 2], [1, 2]]
+            x = x.ravel()  # Ensure x[0], x[1] works
+            if as_index and (x[0] < 0 or x[1] < 0):
+                raise ValueError("index can't contain negative values")
+            return ((x[0], x[1]),) * ndim
+
+    if as_index and x.min() < 0:
+        raise ValueError("index can't contain negative values")
+
+    # Converting the array with `tolist` seems to improve performance
+    # when iterating and indexing the result (see usage in `pad`)
+    return np.broadcast_to(x, (ndim, 2)).tolist()
+
+
+def make_unpad_slices(ndim, pad_width):
+    slices = list()
+    for begin_pad, end_pad in _as_pairs(pad_width, ndim, as_index=True):
+        if end_pad is not None:
+            if end_pad == 0:
+                end_pad = None
+            else:
+                end_pad = -end_pad
+        slices.append(slice(begin_pad, end_pad))
+    return tuple(slices)
+
+
+def unpad(pad_width, *args):
+    if len(args) == 0:
+        raise ValueError('Expected at least one array to unpad')
+    unpad_slices = make_unpad_slices(args[0].ndim, pad_width)
+    if any(not np.array_equal(a.shape, args[0].shape) for a in args):
+        raise ValueError('All arrays passed to unpad must have the same shape')
+    if len(args) == 1:
+        return args[0][unpad_slices]
+    return tuple(arr[unpad_slices] for arr in args)
