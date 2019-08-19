@@ -5,7 +5,7 @@ from .analytic_wavelet_transform_moments import instantaneous_frequency, amplitu
 from .analytic_wavelet import rotate, quadratic_interpolate, linear_interpolate, GeneralizedMorseWavelet
 
 
-__all__ = ['ridges', 'ridge_collapse', 'dense_ridge', 'period_indices']
+__all__ = ['ridges', 'ridge_collapse', 'ridge_compress', 'dense_ridge', 'period_indices']
 
 
 def period_indices(instantaneous_frequencies, spacing=1, dt=1, time_axis=-1):
