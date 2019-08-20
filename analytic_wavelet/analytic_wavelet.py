@@ -17,7 +17,8 @@ __all__ = [
     'analytic_wavelet_transform',
     'transform_maxima',
     'quadratic_interpolate',
-    'linear_interpolate']
+    'linear_interpolate',
+    'analytic_transform']
 
 
 class GeneralizedMorseWavelet:
@@ -200,8 +201,8 @@ class GeneralizedMorseWavelet:
                 If neither high or nyquist_overlap is provided, then the function behaves as though
                 nyquist_overlap=0.1 and high=np.pi
             endpoint_overlap: If provided, the lowest frequency wavelet will reach endpoint_overlap times its central
-                window width at the ends of the time-window. If both low and endpoint_overlap are provided, then the cutoff
-                frequency is set to the maximum of low and cutoff determined by the endpoint_overlap parameter.
+                window width at the ends of the time-window. If both low and endpoint_overlap are provided, then the
+                cutoff frequency is set to the maximum of low and cutoff determined by the endpoint_overlap parameter.
                 If neither low or endpoint_overlap is provided, then the function behaves as though
                 endpoint_overlap=5 and low=num_timepoints.
             density: Controls the amount of overlap in the frequency domain. When density == 1, the peak of one
@@ -633,7 +634,7 @@ def transform_maxima(scale_frequencies, w, min_amplitude=None, freq_axis=-2, tim
     return indices, interpolated, scale_frequencies_interp(freq_hat)
 
 
-def quadratic_interpolate(t1, t2, t3, x1, x2, x3, t=None):
+def quadratic_interpolate(t1, t2, t3, x1, x2, x3, t=None, return_fit=False):
     numerator = x1 * (t2 - t3) + x2 * (t3 - t1) + x3 * (t1 - t2)
     denominator = (t1 - t2) * (t1 - t3) * (t2 - t3)
     a = numerator / denominator
@@ -646,11 +647,15 @@ def quadratic_interpolate(t1, t2, t3, x1, x2, x3, t=None):
 
     return_t = t is None
     if t is None:
-        t = -b / 2 * a
+        t = -b / (2 * a)
 
     x = a * t ** 2 + b * t + c
     if return_t:
+        if return_fit:
+            return x, t, a, b, c
         return x, t
+    if return_fit:
+        return x, a, b, c
     return x
 
 
@@ -777,3 +782,34 @@ def unpad(pad_width, *args):
     if len(args) == 1:
         return args[0][unpad_slices]
     return tuple(arr[unpad_slices] for arr in args)
+
+
+def analytic_transform(x, is_output_frequency=False):
+    """
+    Gives the analytic part of a signal
+    Args:
+        x: An array of shape (..., time)
+        is_output_frequency: If True, the frequency domain signal is returned.
+            Otherwise the time domain signal is returned.
+    Returns:
+        An array of the same shape as x
+    """
+    z = fft(np.where(np.isnan(x), 0, x))
+    if np.isrealobj(x):
+        z = 2 * z
+    if x.shape[-1] // 2 * 2 == x.shape[-1]:  # even
+        indices = np.arange(x.shape[-1] // 2 + 1, z.shape[-1])
+        np.put_along_axis(z, np.reshape(indices, (1,) * (len(z.shape) - 1) + (-1,)), 0, -1)
+        np.put_along_axis(
+            z,
+            np.reshape(np.array([x.shape[-1] - 1]), (1,) * (len(z.shape) - 1) + (-1,)),
+            np.take(z, x.shape[-1] // 2, -1),
+            -1)
+    else:
+        indices = np.arange((x.shape[-1] + 1) // 2, z.shape[-1])
+        np.put_along_axis(z, np.reshape(indices, (1,) * (len(z.shape) - 1) + (-1,)), 0, -1)
+    if not is_output_frequency:
+        z = ifft(z)
+        if z.shape[-1] != x.shape[-1]:
+            z = np.take(z, np.arange(0, x.shape[-1]), -1)
+    return z

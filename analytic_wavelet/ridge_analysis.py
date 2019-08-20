@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from typing import Optional, Tuple
 import numpy as np
-from .analytic_wavelet_transform_moments import instantaneous_frequency, amplitude, first_central_diff
+from .analytic_moments import instantaneous_frequency, amplitude, first_central_diff
 from .analytic_wavelet import rotate, quadratic_interpolate, linear_interpolate, GeneralizedMorseWavelet
 
 
@@ -350,6 +350,8 @@ def ridges(
         result = result + [total_err]
 
     expanded_shape = ridge_ids.shape if len(x.shape) == 1 else ridge_ids.shape + (x.shape[1],)
+    # compress ridge_ids, re-expand it, and compress it again in the loop below
+    result[0] = result[0][ridge_indices]
     expanded_ridge_indices = None
     for idx in range(len(result)):
         if idx == 0:
@@ -415,12 +417,11 @@ def _mask_ridges(ridge_ids, mask):
 
 
 def _indicator_ridge(x, scale_frequencies, ridge_kind, min_amplitude, frequency_min, frequency_max, mask):
-    variable_axis = None
+
+    variable_axis = 1 if len(x.shape) == 4 else None
 
     frequency = instantaneous_frequency(x, variable_axis=variable_axis)
 
-    if len(x.shape) == 4:
-        variable_axis = 1
     if ridge_kind == 'amplitude':
         ridge_quantity = amplitude(x, variable_axis=variable_axis)
     elif ridge_kind == 'phase':
@@ -439,7 +440,8 @@ def _indicator_ridge(x, scale_frequencies, ridge_kind, min_amplitude, frequency_
     elif ridge_kind == 'phase':
         rqf = np.roll(ridge_quantity, 1, axis=-2)
         rqb = np.roll(ridge_quantity, -1, axis=-2)
-        # d/ds < 0
+        # d/ds < 0. This assumes scale decreases in columns...
+        # TODO: add check that scale decreases in columns or change how we compute this
         result = np.logical_or(np.logical_and(rqb < 0, rqf >= 0), np.logical_and(rqb <= 0, rqf > 0))
         del rqf
         del rqb
@@ -458,6 +460,7 @@ def _indicator_ridge(x, scale_frequencies, ridge_kind, min_amplitude, frequency_
             np.logical_and(result, np.roll(result, 1, axis=-2)),
             abs_ridge_quantity > np.roll(abs_ridge_quantity, 1, axis=-2))))
 
+    # remove nan and threshold
     result = np.logical_and(result, np.logical_not(np.isnan(x)))
     result = np.logical_and(result, np.abs(x) >= min_amplitude)
 
@@ -487,11 +490,13 @@ def _assign_ridge_ids(indicator_points, ridge_quantity, instantaneous_frequencie
     instantaneous_frequencies, df_dt = _ridge_interpolate(
         [instantaneous_frequencies, df_dt], (batch_indices, scale_indices, time_indices), ridge_quantity,
         keep_shapes=True)
+
     fr_next = instantaneous_frequencies + df_dt
     fr_prev = instantaneous_frequencies - df_dt
 
     # compress the scale axis to only enough for the total number of simultaneous ridge points
-    ridge_indices = np.cumsum(indicator_points, axis=1)
+    ridge_indices = np.cumsum(indicator_points, axis=1) - 1
+
     max_simultaneous_ridge_points = np.max(ridge_indices) + 1
 
     # this converts ridge_indices into a 1d array which is now suitable for replacing
@@ -520,10 +525,17 @@ def _assign_ridge_ids(indicator_points, ridge_quantity, instantaneous_frequencie
 
     df[df > alpha] = np.nan
 
-    next_ridge_indices = np.nanargmin(df, axis=3)[(batch_indices, time_indices, ridge_indices)]
-    next_ridge_indices = np.where(np.isnan(next_ridge_indices), -1, next_ridge_indices).astype(int)
+    # slices of all nan are a problem even if we use nanargmin,
+    # so instead replace nan by a number larger than any legitimate number
+    large_df = np.nanmax(df) + 1
+    indicator_invalid = np.isnan(df)
+    df = np.where(indicator_invalid, large_df, df)
 
-    ridge_ids = np.full(df.shape, -1, dtype=int)
+    next_ridge_indices = np.where(np.all(indicator_invalid, axis=3), -1, np.argmin(df, axis=3))
+    next_ridge_indices = next_ridge_indices[(batch_indices, time_indices, ridge_indices)]
+    next_ridge_indices = next_ridge_indices.astype(int)
+
+    ridge_ids = np.full(instantaneous_frequencies_ridge.shape, -1, dtype=int)
     ridge_ids[(batch_indices, time_indices, ridge_indices)] = np.arange(len(batch_indices))
     indicator_valid_next = np.logical_and(next_ridge_indices >= 0, time_indices + 1 < ridge_ids.shape[1])
     valid_next_batch_indices = batch_indices[indicator_valid_next]
@@ -541,7 +553,7 @@ def _assign_ridge_ids(indicator_points, ridge_quantity, instantaneous_frequencie
 
     # return to the original scale axis
     result = np.full(indicator_points.shape, -1, dtype=int)
-    result[(batch_indices, time_indices, scale_indices)] = ridge_ids[(batch_indices, time_indices, ridge_indices)]
+    result[(batch_indices, scale_indices, time_indices)] = ridge_ids[(batch_indices, time_indices, ridge_indices)]
     return result
 
 
@@ -561,6 +573,9 @@ def _ridge_interpolate(x_list, indices, ridge_quantity, morse_wavelet=None, mu=N
     batch_indices, scale_indices, time_indices = indices
 
     dr = ridge_quantity[(batch_indices, scale_indices, time_indices)]
+    # should always be true because maximum and minimum scales cannot be ridge points
+    assert(np.all(scale_indices + 1 < ridge_quantity.shape[1]))
+    assert(np.all(scale_indices - 1 >= 0))
     dr_plus = ridge_quantity[(batch_indices, scale_indices + 1, time_indices)]
     dr_minus = ridge_quantity[(batch_indices, scale_indices - 1, time_indices)]
 
@@ -569,7 +584,7 @@ def _ridge_interpolate(x_list, indices, ridge_quantity, morse_wavelet=None, mu=N
         np.abs(dr_minus) ** 2, np.abs(dr) ** 2, np.abs(dr_plus) ** 2)
 
     indicator_interpolation_fail = np.logical_not(np.logical_and(
-        scale_indices + 1 > interpolated_scales, interpolated_scales > scale_indices - 1))
+        scale_indices + 1 >= interpolated_scales, interpolated_scales >= scale_indices - 1))
 
     interpolated_scales[indicator_interpolation_fail] = linear_interpolate(
         scale_indices[indicator_interpolation_fail] - 1, scale_indices[indicator_interpolation_fail] + 1,
