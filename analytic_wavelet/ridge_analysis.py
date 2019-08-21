@@ -1,11 +1,15 @@
-from dataclasses import dataclass
-from typing import Optional, Tuple
+import warnings
 import numpy as np
 from .analytic_moments import instantaneous_frequency, amplitude, first_central_diff
 from .analytic_wavelet import rotate, quadratic_interpolate, linear_interpolate, GeneralizedMorseWavelet
 
 
-__all__ = ['ridges', 'ridge_collapse', 'ridge_compress', 'dense_ridge', 'period_indices']
+__all__ = [
+    'ridges',
+    'period_indices',
+    'RidgeRepresentation',
+    'RidgeFields',
+    'RidgeResult']
 
 
 def period_indices(instantaneous_frequencies, spacing=1, dt=1, time_axis=-1):
@@ -37,7 +41,7 @@ def period_indices(instantaneous_frequencies, spacing=1, dt=1, time_axis=-1):
     return np.where(indices < 0, instantaneous_frequencies.shape[time_axis], indices)
 
 
-def dense_ridge(x, original_shape, ridge_indices, fill_value=np.nan):
+def _dense_ridge(x, original_shape, ridge_indices, fill_value=np.nan):
     """
     Converts the sparse 1d representation output by ridges to a dense array
     Args:
@@ -54,15 +58,14 @@ def dense_ridge(x, original_shape, ridge_indices, fill_value=np.nan):
     return result
 
 
-def ridge_compress(x_list, original_shape, ridge_indices, ridge_ids, scale_axis=-2, fill_value=np.nan):
+def _ridge_compress(x_list, original_shape, ridge_indices, ridge_ids, scale_axis=-2, fill_value=np.nan):
     """
     Conceptually, this maps each item in x_list to a dense representation, and then replaces the scale
         axis with a ridge id axis, so that each ridge lives on a single component of the ridge axis
         and ridge_ids map to indices in tha ridge axis.
     Args:
-        x_list: The values on the ridge to collapse. If a list, then the first item in the list must be
-            the wavelet coefficients. If an array, then the array is the wavelet coefficients. All values should
-            be 1d arrays output by ridges
+        x_list: The values on the ridge to collapse. Either a 1d array, or a list of 1d arrays. If a list,
+            then each item in the list is converted.
         original_shape: The shape of the wavelet coefficients array passed in to ridges
         ridge_indices: The coordinates of the wavelet coefficients, as output by ridges
         ridge_ids: The ids of the ridges, as output by ridges
@@ -76,20 +79,46 @@ def ridge_compress(x_list, original_shape, ridge_indices, ridge_ids, scale_axis=
     is_singleton = not isinstance(x_list, (list, tuple))
     if is_singleton:
         x_list = [x_list]
-    if len(ridge_indices) != len(original_shape):
-        raise ValueError('Shape mismatch between ridge_indices (len {}) and original_shape (len {})'.format(
-            len(ridge_indices), len(original_shape)))
-    ridge_indices = ridge_indices[:scale_axis] + ridge_indices[scale_axis + 1:]
-    original_shape = original_shape[:scale_axis] + original_shape[scale_axis + 1:]
+
+    multiple_original_shapes = isinstance(original_shape[0], (list, tuple))
+    if not multiple_original_shapes:
+        original_shape = [original_shape] * len(x_list)
+    if len(original_shape) != len(x_list):
+        raise ValueError('If multiple original shapes are provided, there must be one for each item in x')
+    for idx in range(1, len(original_shape)):
+        if not np.array_equal(original_shape[idx][:len(ridge_indices)], original_shape[0][:len(ridge_indices)]):
+            raise ValueError('Shapes must agree up to the number of ridge_indices: {}, {}'.format(
+                original_shape[idx], original_shape[0]))
+        if len(original_shape[0]) != len(original_shape[idx]):
+            raise ValueError('All shapes must have the same number of dimensions: {}, {}'.format(
+                original_shape[idx], original_shape[0]))
+
+    if scale_axis < 0:
+        scale_axis += len(original_shape[0])
+        assert(0 <= scale_axis < len(original_shape[0]))
+    if len(ridge_indices) < scale_axis:
+        raise ValueError('Shape mismatch between ridge_indices (len {}) and provided scale_axis ({})'.format(
+            len(ridge_indices), scale_axis))
+
+    for idx in range(len(original_shape)):
+        if len(original_shape[idx]) < scale_axis:
+            raise ValueError('Shape mismatch between original_shape (len {}) and provided scale_axis ({})'.format(
+                len(original_shape[idx]), scale_axis))
+        original_shape[idx] = original_shape[idx][:scale_axis] + original_shape[idx][(scale_axis + 1):]
+    ridge_indices = ridge_indices[:scale_axis] + ridge_indices[(scale_axis + 1):]
     dense_ridges = list()
     for _ in x_list:
         dense_ridges.append(list())
+    if ridge_ids.ndim > 1:
+        if ridge_ids.ndim > 2 or ridge_ids.shape[1] != 1:
+            raise ValueError('Expected ridge_ids to be 1d')
+        ridge_ids = np.squeeze(ridge_ids, axis=1)
     for ridge_id in np.unique(ridge_ids):
         indicator_ridge_id = ridge_ids == ridge_id
         ridge_id_indices = tuple(ri[indicator_ridge_id] for ri in ridge_indices)
         for idx, x in enumerate(x_list):
             dense_ridges[idx].append(np.expand_dims(
-                dense_ridge(x[indicator_ridge_id], original_shape, ridge_id_indices, fill_value=fill_value),
+                _dense_ridge(x[indicator_ridge_id], original_shape[idx], ridge_id_indices, fill_value=fill_value),
                 scale_axis))
     for idx in range(len(dense_ridges)):
         dense_ridges[idx] = np.concatenate(dense_ridges[idx], axis=scale_axis)
@@ -98,73 +127,362 @@ def ridge_compress(x_list, original_shape, ridge_indices, ridge_ids, scale_axis=
     return dense_ridges
 
 
-def ridge_collapse(x_list, original_shape, ridge_indices, scale_axis=-2):
-    """
-    Collapses the multiple ridges output by ridges into a single ridge by combining together ridges which exist
-        simultaneously.
-    Args:
-        x_list: The values on the ridge to collapse. If a list, then the first item in the list must be
-            the wavelet coefficients. If an array, then the array is the wavelet coefficients. All values should
-            be 1d arrays output by ridges
-        original_shape: The shape of the wavelet coefficients array passed in to ridges
-        ridge_indices: The coordinates of the wavelet coefficients, as output by ridges
-        scale_axis: Which axis in the coordinates is the scale axis
-    Returns:
-        x / x_list: The collapsed ridge values
-        ridge_indices: The coordinates of the collapsed ridge values (does not contain scale axis coordinates)
-    """
-    is_singleton = not isinstance(x_list, (list, tuple))
-    if is_singleton:
-        x_list = [x_list]
-    power = None
-    result = list()
-    indicator_ridge = np.full(original_shape, False)
-    indicator_ridge[ridge_indices] = True
-    indicator_ridge = np.max(indicator_ridge, axis=scale_axis)
-    new_indices = np.nonzero(indicator_ridge)
-    del indicator_ridge
-    for idx, item in enumerate(x_list):
-        item = dense_ridge(item, original_shape, ridge_indices, fill_value=0)
-        if idx == 0:
-            if len(x_list) > 1:
-                power = np.square(np.abs(item))
-            c = np.sum(item, axis=scale_axis)
+class RidgeRepresentation:
+    points = 'points'
+    compressed = 'compressed'
+    dense = 'dense'
+
+    def __init__(self):
+        raise RuntimeError('Constant class. do not instantiate')
+
+
+class RidgeFields:
+    ridge_values = 'ridge_values'
+    instantaneous_frequency = 'instantaneous_frequency'
+    instantaneous_bandwidth = 'instantaneous_bandwidth'
+    instantaneous_curvature = 'instantaneous_curvature'
+    total_error = 'total_error'
+    ridge_ids = 'ridge_ids'
+
+    def __init__(self):
+        raise RuntimeError('Constant class. do not instantiate')
+
+
+class RidgeResult:
+
+    def __init__(
+            self,
+            original_shape,
+            ridge_values,
+            indices,
+            ridge_ids,
+            instantaneous_frequency,
+            instantaneous_bandwidth,
+            instantaneous_curvature,
+            total_error,
+            variable_axis,
+            scale_axis):
+        """
+        You should not call this constructor yourself. Call ridges to create an instances of RidgeResult
+        Args:
+            original_shape: The shape of the data on which ridge analysis was run
+            ridge_values: A 1d array of interpolated values of x for all points on a ridge
+            indices: A tuple of indices giving coordinates of ridge points in x. If z is an array of zeros
+                with the same shape as x, then z[indices] = ridge_values would have interpolated values of
+                x wherever x has a ridge point and zero everywhere else.
+            ridge_ids: Same shape as ridge_values, giving the id of the ridge for each ridge value
+            instantaneous_frequency: Same shape as ridge_values. Instantaneous frequencies along the ridge
+            instantaneous_bandwidth: Same shape as ridge_values. Instantaneous bandwidth along the ridge
+            instantaneous_curvature: Same shape as ridge_values. Instantaneous curvature along the ridge
+            total_error: Same shape as ridge_values.
+            variable_axis: Which axis contains the components of multivariate values (or None for univariate)
+            scale_axis: Which axis contains the scales in the original shape
+        """
+        self._ridge_values = ridge_values
+        self._indices = indices
+        self._ridge_ids = ridge_ids
+        self._instantaneous_frequency = instantaneous_frequency
+        self._instantaneous_bandwidth = instantaneous_bandwidth
+        self._instantaneous_curvature = instantaneous_curvature
+        self._total_error = total_error
+
+        # internally, the variable axis is the last axis. This means that when we use point/collapsed (sparse)
+        # representation the values are actually the multivariate points, which is much more intuitive for the caller.
+        # When we convert to a dense/compressed representation we do so by first converting
+        # to a dense representation as though the variable axis were last and then moving that axis.
+        # Therefore, we adjust the shape and the scale axis here to move the variable axis last for calls
+        # to helper functions
+        self._true_variable_axis = variable_axis
+        self._modified_scale_axis = scale_axis
+        self._modified_original_shape = original_shape
+        if self._true_variable_axis is not None:
+            # handle negative variable axis index
+            if self._true_variable_axis < 0:
+                self._true_variable_axis += len(self._modified_original_shape)
+                assert (0 <= self._true_variable_axis < len(self._modified_original_shape))
+            if self._modified_scale_axis < 0:
+                self._modified_scale_axis += len(self._modified_original_shape)
+                assert (0 <= self._modified_scale_axis < len(self._modified_original_shape))
+            # the scale axis is after the variable axis, so when we move the variable axis we decrement it
+            if self._modified_scale_axis > self._true_variable_axis:
+                self._modified_scale_axis -= 1
+            self._modified_original_shape = (
+                self._modified_original_shape[:self._true_variable_axis] +
+                self._modified_original_shape[self._true_variable_axis+1:] +
+                (self._modified_original_shape[self._true_variable_axis],))
+
+    def ridge_values(self, representation=RidgeRepresentation.points, fill_value=np.nan):
+        """
+        Interpolated values of the wavelet coefficients for all points on a ridge
+        Args:
+            representation: A RidgeRepresentation specifying how ridge values should be returned:
+                points: Return a 1d (univariate) or 2d (mulitivariate) array where each item on the first axis is
+                    a point on a ridge
+                dense: Return the ridge_values in a dense array having the same shape as the data on which ridge
+                    analysis was originally run. Elements of the array not on a ridge will use fill_value as their
+                    values.
+                compressed: Similar to dense, but where the scale axis is replaced by a ridge axis. In
+                    this representation, the ridge_ids index the array along the ridge axis, so that ridge_id 7
+                    is in position 7 on the ridge axis in the compressed array.
+            fill_value: The value to use for elements of the array not on the ridge in a dense or compressed
+                representation. Ignored for representation == 'points'
+
+        Returns:
+            The ridge_values (interpolated wavelet coefficients) according to the specified representation.
+        """
+        return self._convert_representation(self._ridge_values, representation, fill_value)
+
+    def instantaneous_frequency(self, representation=RidgeRepresentation.points, fill_value=np.nan):
+        """
+        The instantaneous frequency for all points on a ridge
+        Args:
+            representation: A RidgeRepresentation specifying how ridge values should be returned:
+                points: Return a 1d (univariate) or 2d (mulitivariate) array where each item on the first axis is
+                    a point on a ridge
+                dense: Return the ridge_values in a dense array having the same shape as the data on which ridge
+                    analysis was originally run. Elements of the array not on a ridge will use fill_value as their
+                    values.
+                compressed: Similar to dense, but where the scale axis is replaced by a ridge axis. In
+                    this representation, the ridge_ids index the array along the ridge axis, so that ridge_id 7
+                    is in position 7 on the ridge axis in the compressed array.
+            fill_value: The value to use for elements of the array not on the ridge in a dense or compressed
+                representation. Ignored for representation == 'points'
+
+        Returns:
+            The instantaneous frequency according to the specified representation.
+        """
+        return self._convert_representation(self._instantaneous_frequency, representation, fill_value)
+
+    def instantaneous_bandwidth(self, representation=RidgeRepresentation.points, fill_value=np.nan):
+        """
+        The instantaneous bandwidth for all points on a ridge. A measure of deviation from a multivariate
+        (or univariate) oscillation. See equation 17 in
+        Lilly and Olhede (2012), Analysis of Modulated Multivariate
+        Oscillations. IEEE Trans. Sig. Proc., 60 (2), 600--612.
+        Args:
+            representation: A RidgeRepresentation specifying how ridge values should be returned:
+                points: Return a 1d (univariate) or 2d (mulitivariate) array where each item on the first axis is
+                    a point on a ridge
+                dense: Return the ridge_values in a dense array having the same shape as the data on which ridge
+                    analysis was originally run. Elements of the array not on a ridge will use fill_value as their
+                    values.
+                compressed: Similar to dense, but where the scale axis is replaced by a ridge axis. In
+                    this representation, the ridge_ids index the array along the ridge axis, so that ridge_id 7
+                    is in position 7 on the ridge axis in the compressed array.
+            fill_value: The value to use for elements of the array not on the ridge in a dense or compressed
+                representation. Ignored for representation == 'points'
+
+        Returns:
+            The instantaneous bandwidth according to the specified representation.
+        """
+        return self._convert_representation(self._instantaneous_bandwidth, representation, fill_value)
+
+    def instantaneous_curvature(self, representation=RidgeRepresentation.points, fill_value=np.nan):
+        """
+        The instantaneous curvature for all points on a ridge. A measure of deviation from a multivariate
+        (or univariate) oscillation. See equation 18 in
+        Lilly and Olhede (2012), Analysis of Modulated Multivariate
+        Oscillations. IEEE Trans. Sig. Proc., 60 (2), 600--612.
+        Args:
+            representation: A RidgeRepresentation specifying how ridge values should be returned:
+                points: Return a 1d (univariate) or 2d (mulitivariate) array where each item on the first axis is
+                    a point on a ridge
+                dense: Return the ridge_values in a dense array having the same shape as the data on which ridge
+                    analysis was originally run. Elements of the array not on a ridge will use fill_value as their
+                    values.
+                compressed: Similar to dense, but where the scale axis is replaced by a ridge axis. In
+                    this representation, the ridge_ids index the array along the ridge axis, so that ridge_id 7
+                    is in position 7 on the ridge axis in the compressed array.
+            fill_value: The value to use for elements of the array not on the ridge in a dense or compressed
+                representation. Ignored for representation == 'points'
+
+        Returns:
+            The instantaneous curvature according to the specified representation.
+        """
+        return self._convert_representation(self._instantaneous_bandwidth, representation, fill_value)
+
+    def total_error(self, representation=RidgeRepresentation.points, fill_value=np.nan):
+        """
+        The total_error for all points on a ridge. A measure of deviation from a multivariate
+        (or univariate) oscillation. Should be << 1 if the ridge estimate is good.
+        Only returned if morse_wavelet is provided
+
+        See equation 62 in
+        Lilly and Olhede (2012), Analysis of Modulated Multivariate
+        Oscillations. IEEE Trans. Sig. Proc., 60 (2), 600--612.
+        Args:
+            representation: A RidgeRepresentation specifying how ridge values should be returned:
+                points: Return a 1d (univariate) or 2d (mulitivariate) array where each item on the first axis is
+                    a point on a ridge
+                dense: Return the ridge_values in a dense array having the same shape as the data on which ridge
+                    analysis was originally run. Elements of the array not on a ridge will use fill_value as their
+                    values.
+                compressed: Similar to dense, but where the scale axis is replaced by a ridge axis. In
+                    this representation, the ridge_ids index the array along the ridge axis, so that ridge_id 7
+                    is in position 7 on the ridge axis in the compressed array.
+            fill_value: The value to use for elements of the array not on the ridge in a dense or compressed
+                representation. Ignored for representation == 'points'
+
+        Returns:
+            The total error according to the specified representation.
+        """
+        if self._total_error is None:
+            return None
+        return self._convert_representation(self._total_error, representation, fill_value)
+
+    def ridge_ids(self, representation=RidgeRepresentation.points, fill_value=-1):
+        """
+        The ridge ids for each point in the ridge
+        Args:
+            representation: A RidgeRepresentation specifying how ridge values should be returned:
+                points: Return a 1d (univariate) or 2d (mulitivariate) array where each item on the first axis is
+                    a point on a ridge
+                dense: Return the ridge_values in a dense array having the same shape as the data on which ridge
+                    analysis was originally run. Elements of the array not on a ridge will use fill_value as their
+                    values.
+                compressed: Similar to dense, but where the scale axis is replaced by a ridge axis. In
+                    this representation, the ridge_ids index the array along the ridge axis, so that ridge_id 7
+                    is in position 7 on the ridge axis in the compressed array.
+            fill_value: The value to use for elements of the array not on the ridge in a dense or compressed
+                representation. Ignored for representation == 'points'
+
+        Returns:
+            The ridge ids according to the specified representation.
+        """
+        return self._convert_representation(self._ridge_ids, representation, fill_value)
+
+    def get_values(self, fields, representation=RidgeRepresentation.points, fill_value=np.nan):
+        """
+        Get the values for multiple fields in a single function call.
+        Args:
+            fields: Either a single RidgeField or a list of RidgeFields
+            representation: The representation to use, from RidgeRepresentation
+            fill_value: The fill_value to use for the dense and compressed representations
+
+        Returns:
+            If fields is a list, returns a list of arrays which are the results. Otherwise a single array.
+        """
+        is_single = not isinstance(fields, (list, tuple))
+        if is_single:
+            fields = [fields]
+
+        available_values = {
+            RidgeFields.ridge_values: self._ridge_values,
+            RidgeFields.instantaneous_frequency: self._instantaneous_frequency,
+            RidgeFields.instantaneous_bandwidth: self._instantaneous_bandwidth,
+            RidgeFields.instantaneous_curvature: self._instantaneous_curvature,
+            RidgeFields.total_error: self._total_error,
+            RidgeFields.ridge_ids: self._ridge_ids
+        }
+
+        requested_values = dict()
+        for field in fields:
+            if field not in available_values:
+                raise ValueError('Unknown field: {}'.format(field))
+            if available_values[field] is not None:
+                requested_values[field] = available_values[field]
+
+        x = [requested_values[field] for field in requested_values]
+        x = self._convert_representation(x, representation, fill_value)
+        assert(len(x) == len(requested_values))
+        requested_values = dict(zip(requested_values, x))
+        result = [requested_values[field] if field in requested_values else None for field in fields]
+        if is_single:
+            return result[0]
+        return result
+
+    def _adjust_dense_shape(self, x):
+        if self._true_variable_axis is not None:
+            return [np.moveaxis(item, -1, self._true_variable_axis) for item in x]
+        return x
+
+    def _dense_shape(self, x):
+        if self._true_variable_axis is None:
+            return self._modified_original_shape
+        # some values broadcast over the multivariate components
+        if isinstance(x, (list, tuple)):
+            return [self._modified_original_shape[:-1] + (item.shape[-1],) for item in x]
+        return self._modified_original_shape[:-1] + (x.shape[-1],)
+
+    def _convert_representation(self, x, representation, fill_value):
+        is_single = not isinstance(x, (tuple, list))
+        if is_single:
+            x = [x]
+        if representation == RidgeRepresentation.points:
+            if self._true_variable_axis is not None:
+                x = [np.squeeze(item, axis=1) if item.shape[1] == 1 else item for item in x]
+        elif representation == RidgeRepresentation.compressed:
+            x = self._adjust_dense_shape(_ridge_compress(
+                x, self._dense_shape(x), self._indices, self._ridge_ids, self._modified_scale_axis,
+                fill_value))
+        elif representation == RidgeRepresentation.dense:
+            x = self._adjust_dense_shape([_dense_ridge(
+                item, self._dense_shape(item), self._indices, fill_value) for item in x])
         else:
-            c = np.sum(item * power, axis=scale_axis) / np.sum(power, axis=scale_axis)
-        result.append(c[new_indices])
-    if is_singleton:
-        result = result[0]
-    return result, new_indices
+            raise ValueError('Unrecognized representation: {}'.format(representation))
+        if is_single:
+            return x[0]
+        return x
 
+    def collapse(self):
+        """
+        Collapses the multiple ridges output by ridges into a single ridge by combining together ridges which exist
+            simultaneously using power-weighted averaging.
+        Returns:
+            A new RidgeResult instance with collapsed ridges
+        """
+        x_list = [
+            self._ridge_values,
+            self._instantaneous_frequency,
+            self._instantaneous_bandwidth,
+            self._instantaneous_curvature,
+        ]
 
-@dataclass
-class RidgesResult:
-    """
-    Result returned from a call to ridges
-    Fields:
-        ridge_values: A 1d array of interpolated values of x for all points on a ridge
-        indices: A tuple of indices giving coordinates of ridge points in x. If z is an array of zeros
-            with the same shape as x, then z[indices] = ridge_values would have interpolated values of
-            x wherever x has a ridge point and zero everywhere else.
-        ridge_ids: Same shape as ridge_values, giving the id of the ridge for each ridge value
-        instantaneous_frequencies: Same shape as ridge_values. Instantaneous frequencies along the ridge
-        instantaneous_bandwidth: Same shape as ridge_values. Instantaneous bandwidth along the ridge
-        instantaneous_curvature: Same shape as ridge_values. Instantaneous curvature along the ridge
-        total_error: Same shape as ridge_values. A measure of deviation from a multivariate
-            (or univariate) oscillation. Should be << 1 if the ridge estimate is good.
-            Only returned if morse_wavelet is provided
+        if self._total_error is not None:
+            x_list.append(self._total_error)
 
-            See equation 62 in
-            Lilly and Olhede (2012), Analysis of Modulated Multivariate
-            Oscillations. IEEE Trans. Sig. Proc., 60 (2), 600--612.
-    """
-    ridge_values: np.ndarray
-    indices: Tuple[np.ndarray, ...]
-    ridge_ids: np.ndarray
-    instantaneous_frequencies: np.ndarray
-    instantaneous_bandwidth: np.ndarray
-    instantaneous_curvature: np.ndarray
-    total_error: Optional[np.ndarray] = None
+        power = None
+        result = list()
+        if self._true_variable_axis is not None:
+            indicator_ridge = np.full(self._modified_original_shape[:-1], False)
+        else:
+            indicator_ridge = np.full(self._modified_original_shape, False)
+        indicator_ridge[self._indices] = True
+        indicator_ridge = np.any(indicator_ridge, axis=self._modified_scale_axis)
+        new_indices = np.nonzero(indicator_ridge)
+        del indicator_ridge
+        for idx, item in enumerate(x_list):
+            item = _dense_ridge(item, self._modified_original_shape, self._indices, fill_value=0)
+            if idx == 0:
+                power = np.square(np.abs(item))
+                c = np.nansum(item, axis=self._modified_scale_axis)
+            else:
+                c = (np.nansum(item * power, axis=self._modified_scale_axis)
+                     / np.nansum(power, axis=self._modified_scale_axis))
+            result.append(c[new_indices])
+
+        original_shape = self._modified_original_shape
+        scale_axis = self._modified_scale_axis
+        if self._true_variable_axis is not None:
+            # restore original shape and scale axis to pass into constructor
+            original_shape = (
+                    original_shape[:self._true_variable_axis]
+                    + (original_shape[-1],)
+                    + original_shape[self._true_variable_axis:-1])
+            if scale_axis + 1 > self._true_variable_axis:
+                scale_axis += 1
+
+        return RidgeResult(
+            original_shape,
+            result[0],
+            new_indices,
+            np.zeros((len(result[0]),) + self._ridge_ids.shape[1:], dtype=int),  # new ridge ids are all 0
+            result[1],
+            result[2],
+            result[3],
+            result[4] if self._total_error is not None else None,
+            self._true_variable_axis,
+            scale_axis)
 
 
 def ridges(
@@ -215,27 +533,20 @@ def ridges(
         variable_axis: If specified, then the ridge is computed jointly over this axis
 
     Returns:
-        An instance of RidgesResult with the fields:
-            ridge_values: A 1d array of interpolated values of x for all points on a ridge
-            indices: A tuple of indices giving coordinates of ridge points in x. If z is an array of zeros
-                with the same shape as x, then z[indices] = ridge_values would have interpolated values of
-                x wherever x has a ridge point and zero everywhere else.
-            ridge_ids: Same shape as ridge_values, giving the id of the ridge for each ridge value
-            instantaneous_frequencies: Same shape as ridge_values. Instantaneous frequencies along the ridge
-            instantaneous_bandwidth: Same shape as ridge_values. Instantaneous bandwidth along the ridge
-            instantaneous_curvature: Same shape as ridge_values. Instantaneous curvature along the ridge
+        An instance of RidgeResult with the fields:
+            ridge_values: Interpolated values of x for all points on a ridge
+            ridge_ids: The id of the ridge for each ridge value
+            instantaneous_frequencies: Instantaneous frequencies along the ridge
+            instantaneous_bandwidth: Instantaneous bandwidth along the ridge
+            instantaneous_curvature: Instantaneous curvature along the ridge
             total_error: Same shape as ridge_values. A measure of deviation from a multivariate
                 (or univariate) oscillation. Should be << 1 if the ridge estimate is good.
                 Only returned if morse_wavelet is provided
-
-                See equation 62 in
-                Lilly and Olhede (2012), Analysis of Modulated Multivariate
-                Oscillations. IEEE Trans. Sig. Proc., 60 (2), 600--612.
     """
-
+    original_shape = x.shape
     if variable_axis is not None:
         x = np.moveaxis(x, (variable_axis, scale_axis, time_axis), (-3, -2, -1))
-        orig_shape = x.shape
+        post_axis_move_shape = x.shape
         x = np.reshape(x, (-1,) + x.shape[-3:])
         if mask is not None:
             mask_scale_axis = scale_axis if scale_axis < variable_axis else scale_axis - 1
@@ -244,14 +555,12 @@ def ridges(
             mask = np.reshape(mask, (-1,) + mask.shape[-2:])
     else:
         x = np.moveaxis(x, (scale_axis, time_axis), (-2, -1))
-        orig_shape = x.shape
+        post_axis_move_shape = x.shape
         x = np.reshape(x, (-1,) + x.shape[-2:])
         if mask is not None:
             mask = np.moveaxis(mask, (scale_axis, time_axis), (-2, -1))
             mask = np.reshape(mask, (-1,) + mask.shape[-2:])
 
-    # we need to keep this in the multivariate case. _indicator_ridge converts x to 3d (which we want
-    # for _assign_ridge_ids, but we also need to keep the 4d version around for interpolation below)
     indicator_ridge, ridge_quantity, instantaneous_frequencies = _indicator_ridge(
         x, scale_frequencies, ridge_kind, 0, frequency_min, frequency_max, mask)
 
@@ -307,7 +616,7 @@ def ridges(
             ridge_ids[(trim_batch_indices, trim_scale_indices, trim_time_indices)] = -1
             indicator_ridge_id = ridge_ids == ridge_id
 
-        # reassign ids so that they will be contiguous
+        # reassign ids so that they will be contiguous (more convenient for caller)
         ridge_ids[indicator_ridge_id] = compressed_id
         compressed_id += 1
 
@@ -337,57 +646,74 @@ def ridges(
     else:
         l2 = np.sqrt(np.square(np.abs(x)))
 
+    # deviation vectors as in
+    #      Lilly and Olhede (2012), Analysis of Modulated Multivariate
+    #           Oscillations. IEEE Trans. Sig. Proc., 60 (2), 600--612., equations (17), (18)
+    # note that instantaneous_frequencies has 1 value per ridge point, but bandwidth and curvature
+    # are multivariate (if x is multivariate)
     bandwidth = (x1 - 1j * instantaneous_frequencies * x) / l2
     curvature = (x2 - 2 * 1j * instantaneous_frequencies * x1 - instantaneous_frequencies ** 2 * x) / l2
 
     result = [ridge_ids, x, instantaneous_frequencies, bandwidth, curvature]
 
     if morse_wavelet is not None:
-        curvature_l2 = np.sqrt(np.sum(np.square(np.abs(curvature)), axis=2, keepdims=True)) \
+        curvature_l2 = np.sqrt(np.sum(np.square(np.abs(curvature)), axis=1, keepdims=True)) \
             if len(curvature.shape) == 2 else np.sqrt(np.square(np.abs(curvature)))
         total_err = (1 / 2 * np.square(np.abs(morse_wavelet.time_domain_width() / instantaneous_frequencies))
                      * curvature_l2)
-        result = result + [total_err]
+        result.append(total_err)
 
     expanded_shape = ridge_ids.shape if len(x.shape) == 1 else ridge_ids.shape + (x.shape[1],)
-    # compress ridge_ids, re-expand it, and compress it again in the loop below
-    result[0] = result[0][ridge_indices]
     expanded_ridge_indices = None
     for idx in range(len(result)):
         if idx == 0:
-            expanded = np.full(expanded_shape, -1, dtype=int)  # ridge_ids
+            # special case for ridge_ids
+            expanded = ridge_ids
+            if len(expanded_shape) == 4:
+                expanded = np.tile(np.expand_dims(expanded, 3), (1, 1, 1, expanded_shape[3]))
         else:
             expanded = np.full(expanded_shape, np.nan, dtype=result[idx].dtype)
+            expanded[ridge_indices] = result[idx]
         if len(expanded_shape) == 4:
-            if len(result[idx].shape) == 3:
-                result[idx] = np.expand_dims(result[idx], 3)
-            if result[idx].shape[3] == 1:
-                result[idx] = np.tile(result[idx], (1, 1, 1, expanded.shape[3]))
-        expanded[ridge_indices] = result[idx]
-        if len(expanded.shape) == 4:
             # move the variable axis back to axis=1
             expanded = np.moveaxis(expanded, -1, 1)
             # reshape back to input shape
-            expanded = np.reshape(expanded, orig_shape)
+            expanded = np.reshape(expanded, post_axis_move_shape)
             # restore axes
             expanded = np.moveaxis(expanded, (-3, -2, -1), (variable_axis, scale_axis, time_axis))
+            # move variable axis to the end again: this means in our sparse representation,
+            # we will get multivariate points
+            expanded = np.moveaxis(expanded, variable_axis, -1)
         else:
             # reshape back to input shape
-            expanded = np.reshape(expanded, orig_shape)
+            expanded = np.reshape(expanded, post_axis_move_shape)
             # restore axes
             expanded = np.moveaxis(expanded, (-2, -1), (scale_axis, time_axis))
         if idx == 0:  # ridge_ids
-            expanded_ridge_indices = np.nonzero(expanded >= 0)
+            if len(expanded_shape) == 4:
+                expanded = expanded[..., :1]  # make the ridge_ids themselves broadcast
+                expanded_ridge_indices = np.nonzero(expanded[..., 0] >= 0)  # ignore the variable axis for indices
+            else:
+                expanded_ridge_indices = np.nonzero(expanded >= 0)
+        else:
+            if len(expanded_shape) == 4:
+                assert(len(result[idx].shape) == 2)
+                if result[idx].shape[1] == 1:
+                    # this was originally broadcasting, so restore the broadcasting semantics
+                    expanded = expanded[..., :1]
         result[idx] = expanded[expanded_ridge_indices]
 
-    return RidgesResult(
+    return RidgeResult(
+        original_shape=original_shape,
         ridge_values=result[1],
         indices=expanded_ridge_indices,
         ridge_ids=result[0],
-        instantaneous_frequencies=result[2],
+        instantaneous_frequency=result[2],
         instantaneous_bandwidth=result[3],
         instantaneous_curvature=result[4],
-        total_error=result[5] if len(result) > 5 else None)
+        total_error=result[5] if len(result) > 5 else None,
+        variable_axis=variable_axis,
+        scale_axis=scale_axis)
 
 
 def _mask_ridges(ridge_ids, mask):
@@ -523,7 +849,9 @@ def _assign_ridge_ids(indicator_points, ridge_quantity, instantaneous_frequencie
 
     df = (np.abs(df1) + np.abs(df2)) / 2
 
-    df[df > alpha] = np.nan
+    with warnings.catch_warnings():
+        warnings.filterwarnings('ignore', category=RuntimeWarning)
+        df = np.where(df > alpha, np.nan, df)
 
     # slices of all nan are a problem even if we use nanargmin,
     # so instead replace nan by a number larger than any legitimate number
@@ -562,6 +890,12 @@ def _compress_scale_axis_to_ridge_axis(
     c = np.full((x.shape[0], x.shape[2], max_simultaneous_ridge_points), np.nan)
     c[(batch_indices, time_indices, ridge_indices)] = x[(batch_indices, scale_indices, time_indices)]
     return c
+
+
+def _expand_trailing(x, target_ndim):
+    if target_ndim <= x.ndim:
+        return x
+    return np.reshape(x, x.shape + (1,) * (target_ndim - x.ndim))
 
 
 def _ridge_interpolate(x_list, indices, ridge_quantity, morse_wavelet=None, mu=None, keep_shapes=False):
@@ -613,15 +947,15 @@ def _ridge_interpolate(x_list, indices, ridge_quantity, morse_wavelet=None, mu=N
         x_ridge_minus = list()
         for x in x_list:
             x_ridge.append(linear_interpolate(
-                np.floor(freq), np.ceil(freq),
+                _expand_trailing(np.floor(freq), x.ndim), _expand_trailing(np.ceil(freq), x.ndim),
                 x[(batch_indices, np.floor(freq).astype(int), time_indices)],
                 x[(batch_indices, np.ceil(freq).astype(int), time_indices)]))
             x_ridge.append(linear_interpolate(
-                np.floor(freq_plus), np.ceil(freq_plus),
+                _expand_trailing(np.floor(freq_plus), x.ndim), _expand_trailing(np.ceil(freq_plus), x.ndim),
                 x[(batch_indices, np.floor(freq_plus).astype(int), time_indices)],
                 x[(batch_indices, np.ceil(freq_plus).astype(int), time_indices)]))
             x_ridge_minus.append(linear_interpolate(
-                np.floor(freq_minus), np.ceil(freq_minus),
+                _expand_trailing(np.floor(freq_minus), x.ndim), _expand_trailing(np.ceil(freq_minus), x.ndim),
                 x[(batch_indices, np.floor(freq_minus).astype(int), time_indices)],
                 x[(batch_indices, np.ceil(freq_minus).astype(int), time_indices)]))
 
@@ -641,17 +975,18 @@ def _ridge_interpolate(x_list, indices, ridge_quantity, morse_wavelet=None, mu=N
     interpolated_x = list()
     for xrm, xr, xrp, x in zip(x_ridge_minus, x_ridge, x_ridge_plus, x_list):
 
-        s = np.reshape(scale_indices, (-1,) + (1,) * (len(xr.shape) - 1))
+        s = _expand_trailing(scale_indices, xr.ndim)
+        s_interp = _expand_trailing(interpolated_scales, xr.ndim)
 
         interpolated_x.append(quadratic_interpolate(
-            s - 1, s, s + 1, xrm, xr, xrp, interpolated_scales))
+            s - 1, s, s + 1, xrm, xr, xrp, s_interp))
 
         interpolated_x[-1][indicator_interpolation_fail] = linear_interpolate(
             s[indicator_interpolation_fail] - 1,
             s[indicator_interpolation_fail] + 1,
             xrm[indicator_interpolation_fail],
             xrp[indicator_interpolation_fail],
-            interpolated_scales[indicator_interpolation_fail])
+            s_interp[indicator_interpolation_fail])
 
         if keep_shapes:
             z = np.full_like(x, np.nan)
