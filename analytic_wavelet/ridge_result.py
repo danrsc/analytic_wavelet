@@ -1,7 +1,6 @@
 import warnings
 import numpy as np
-from .analytic_wavelet import rotate
-
+from .transform import rotate
 
 __all__ = ['RidgeFields', 'RidgeRepresentation', 'RidgeResult']
 

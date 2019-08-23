@@ -2,9 +2,11 @@ import warnings
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+from .interpolate import quadratic_interpolate, linear_interpolate
 from .ridge_result import RidgeResult
 from .analytic_moments import instantaneous_frequency, amplitude
-from .analytic_wavelet import rotate, quadratic_interpolate, linear_interpolate, GeneralizedMorseWavelet
+from .generalized_morse_wavelet import GeneralizedMorseWavelet
+from .transform import rotate
 
 
 __all__ = ['ridges', 'period_indices']
