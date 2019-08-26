@@ -400,52 +400,64 @@ class GeneralizedMorseWavelet:
 
         return psi, psi_f
 
-    def taylor_expansion_time_domain_wavelet(self, time, scale_frequency, use_cumulant=False, max_term=None):
+    def taylor_expansion_time_domain_wavelet(self, time, scale_frequency, use_cumulant=False, num_terms=None):
         """
         Computes the value of the wavelet function (of the lowest order orthogonal family member)
-        in the time domain at the specified time using a Taylor series expansion
+        in the time domain at the specified time using a Taylor series expansion. See equations (30) and (31)
+        in Lilly and Olhede, 2009. Higher Order Properties of Analytic Wavelets
         Args:
             time: The time point (or time points) for which to compute the wavelet. Arbitrary shape.
-            scale_frequency: Which scale to compute the wavelet for
+            scale_frequency: Which scale(s) to compute the wavelet for. Arbitrary shape.
             use_cumulant: If True, the cumulants are used to compute the log of the wavelet, and it is exponentiated
                 after. If False (the default), the moments are used to compute the wavelet directly
-            max_term: How many terms of the Taylor expansion to use
+            num_terms: How many terms of the Taylor expansion to use. Defaults to 100
 
         Returns:
-            psi, the time domain wavelet evaluated at the points specified by time. Same shape as time.
+            psi, the time domain wavelet evaluated at the points specified by time and scale_frequency.
+                shape = scale_frequency.shape + time.shape
         """
 
         if not np.isscalar(self.beta):
             raise ValueError('This function is only supported for scalar GeneralizedMorseWavelet')
-        if not np.isscalar(scale_frequency):
-            raise ValueError('scale_frequency must be scalar')
 
-        s = 1 if self.beta == 0 else self.peak_frequency() / scale_frequency
-        psi = None
+        s = np.ones_like(scale_frequency) if self.beta == 0 else self.peak_frequency() / scale_frequency
+        s = np.asarray(s)
+        time = np.asarray(time)
+
+        s_shape = s.shape
+        time_shape = time.shape
+
+        time = np.reshape(time, (1, -1))
+        s = np.reshape(s, (-1, 1))
+
         if use_cumulant:
-            if max_term is None:
-                max_term = 100  # comment says this is 10 in the cumulant case, but code seems to set to 100
-            _, cumulants = self.frequency_domain_cumulants(max_term)
-            for term, cumulant in enumerate(cumulants):
-                term_psi = (((1j * (time / s)) ** term) / np.math.factorial(term)) * cumulant
-                if psi is None:
-                    psi = term_psi
-                else:
-                    psi += term_psi
-            psi = (1 / s) * psi
+            if num_terms is None:
+                num_terms = 100  # comment says this is 10 in the cumulant case, but code seems to set to 100
+            _, terms = self.frequency_domain_cumulants(num_terms - 1)
         else:
-            if max_term is None:
-                max_term = 100
-            for term in range(max_term + 1):
-                term_psi = (((1j * (time / s)) ** term) / np.math.factorial(term)) * self.frequency_domain_moment(term)
-                if psi is None:
-                    psi = term_psi
-                else:
-                    psi += term_psi
-            psi = (1 / s) * np.exp(psi)
-
+            if num_terms is None:
+                num_terms = 100
+            terms = [self.frequency_domain_moment(t) for t in range(num_terms)]
+        assert(len(terms) == num_terms)
+        psi = None
+        for order, term in enumerate(terms):
+            term_psi = (((1j * (time / s)) ** order) / np.math.factorial(order)) * term
+            if psi is None:
+                psi = np.full((len(terms),) + term_psi.shape, np.nan, term_psi.dtype)
+            # factorial can return an object array type for large orders
+            # so we need to cast this back to complex128 after dividing by the factorial
+            psi[order] = term_psi.astype(psi.dtype)
+        psi = np.nansum(psi, axis=0)
+        if use_cumulant:
+            psi = np.exp(psi)
+        psi = (1 / s) * psi
         psi0 = (1 / s) * self.frequency_domain_moment(0)
-        return np.where(np.abs(psi) > np.abs(psi0) * 1.05, np.nan, psi)
+
+        # To remove effects of the Taylor series expansion leading to incorrectly
+        # high values far from the wavelet center, any coefficients exceeding the
+        # central maximum value by more than five percent are set to NaNs.
+        result = np.where(np.abs(psi) > np.abs(psi0) * 1.05, np.nan, psi)
+        return np.reshape(result, s_shape + time_shape)
 
     def _first_family(self, fact, num_timepoints, num_orthogonal_family_members, omega, psi_zero):
         beta = np.reshape(self.beta, self.beta.shape + (1, 1))
