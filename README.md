@@ -12,41 +12,28 @@ also replaced custom functions with built-in numpy and scipy functions where it 
 
 Rough mappings from functions in jLab to functions/methods in analytic_wavelet. Not all APIs map exactly
 
-jLab                    analytic_wavelet
-instmom                 ( amplitude, instantaneous_frequency, instantaneous_curvature, instantaneous_moments )
-isomax                  ElementAnalysisMorse.isolated_maxima
-lininterp               linear_interpolate
-maxprops                ElementAnalysisMorse.event_parameters
-morseafun               GeneralizedMorseWavelet.amplitude
-morsebox                GeneralizedMorseWavelet.heisenberg_box
-morsefreq               ( GeneralizedMorseWavelet.peak_frequency, 
-                          GeneralizedMorseWavelet.energy_frequency, 
-                          GeneralizedMorseWavelet.instantaneous_frequency,
-                          GeneralizedMorseWavelet.curvature_instantaneous_frequency )
-morsemom                ( GeneralizedMorseWavelet.frequency_domain_moment,
-                          GeneralizedMorseWavelet.energy_moment,
-                          GeneralizedMorseWavelet.frequency_domain_cumulants,
-                          GeneralizedMorseWavelet.energy_cumulants ) 
-morseprops              ( GeneralizedMorseWavelet.time_domain_width,
-                          GeneralizedMorseWavelet.demodulated_skewness_imag,
-                          GeneralizedMorseWavelet.demodulated_kurtosis )
-morseregion             ElementAnalysisMorse.region_of_influence (localization region part of morseregion not implemented)
-morsespace              GeneralizedMorseWavelet.log_spaced_frequencies
-morsewave               GeneralizedMorseWavelet.make_wavelet
-morsexpand              GeneralizedMorseWavelet.taylor_expansion_time_domain_wavelet
-periodindex             period_indices
-quadinterp              quadratic_interpolate
-ridgewalk               ridges
-ridgemap                ( RidgeResult.ridge_values, 
-                          RidgeResult.instantaneous_frequency, 
-                          RidgeResult.instantaneous_bandwidth,
-                          RidgeResult.instantaneous_curvature,
-                          RidgeResult.total_error,
-                          RidgeResult.get_values,
-                          RidgeResult.ridge_ids,
-                          RidgeResult.collapse )
-rot                     rotate
-transmax                maxima_of_transform
-transmaxdist            distribution_of_maxima_of_transformed_noise
-wavespecplot            ( wavelet_contourf, time_series_plot )
-wavetrans               analytic_wavelet_transform
+| jLab         | analytic_wavelet |
+| ------------ | ---------------- |
+| anatrans | analytic_transform |
+| instmom |  <ul><li>amplitude</li><li>instantaneous_frequency</li><li>instantaneous_curvature</li><li>instantaneous_moments</li></ul> |
+| isomax  | ElementAnalysisMorse.isolated_maxima |
+| lininterp | linear_interpolate |
+| maxprops | ElementAnalysisMorse.event_parameters |
+| morseafun | GeneralizedMorseWavelet.amplitude |
+| morsebox | GeneralizedMorseWavelet.heisenberg_box |
+| morsefreq | <ul><li>GeneralizedMorseWavelet.peak_frequency</li><li>GeneralizedMorseWavelet.energy_frequency</li><li>GeneralizedMorseWavelet.instantaneous_frequency</li><li>GeneralizedMorseWavelet.curvature_instantaneous_frequency</li></ul> |
+| morsemom | <ul><li>GeneralizedMorseWavelet.frequency_domain_moment</li><li>GeneralizedMorseWavelet.energy_moment</li><li>GeneralizedMorseWavelet.frequency_domain_cumulants</li><li>GeneralizedMorseWavelet.energy_cumulants</li></ul> |
+| morseprops | <ul><li>GeneralizedMorseWavelet.time_domain_width</li><li>GeneralizedMorseWavelet.demodulated_skewness_imag</li><li>GeneralizedMorseWavelet.demodulated_kurtosis</li></ul> |
+| morseregion | ElementAnalysisMorse.region_of_influence (localization region part of morseregion not implemented) |
+| morsespace | GeneralizedMorseWavelet.log_spaced_frequencies |
+| morsewave | GeneralizedMorseWavelet.make_wavelet |
+| morsexpand | GeneralizedMorseWavelet.taylor_expansion_time_domain_wavelet |
+| periodindex | period_indices |
+| quadinterp | quadratic_interpolate |
+| ridgewalk | ridges |
+| ridgemap | <ul><li>RidgeResult.ridge_values</li><li>RidgeResult.instantaneous_frequency</li><li>RidgeResult.instantaneous_bandwidth</li><li>RidgeResult.instantaneous_curvature</li><li>RidgeResult.total_error</li><li>RidgeResult.get_values</li><li>RidgeResult.ridge_ids</li><li>RidgeResult.collapse</li></ul> |
+| rot | rotate |
+| transmax | maxima_of_transform |
+| transmaxdist | distribution_of_maxima_of_transformed_noise |
+| wavespecplot | <ul><li>wavelet_contourf</li><li>time_series_plot</li></ul> |
+| wavetrans | <ul><li>analytic_wavelet_transform</li><li>to_frequency_domain_wavelet</li><li>masked_detrend</li><li>make_unpad_slices</li><li>unpad</li></ul> |
