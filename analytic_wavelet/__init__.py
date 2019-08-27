@@ -2,7 +2,6 @@ from . import analytic_moments
 from . import element_analysis
 from . import generalized_morse_wavelet
 from . import interpolate
-from . import noise_distribution
 from . import preprocess
 from . import ridge_analysis
 from . import ridge_result
@@ -14,7 +13,6 @@ from .analytic_moments import *
 from .element_analysis import *
 from .generalized_morse_wavelet import *
 from .interpolate import *
-from .noise_distribution import *
 from .preprocess import *
 from .ridge_analysis import *
 from .ridge_result import *
@@ -27,7 +25,6 @@ __all__ = [
     'element_analysis',
     'generalized_morse_wavelet',
     'interpolate',
-    'noise_distribution',
     'preprocess',
     'ridge_analysis',
     'ridge_result',
@@ -39,7 +36,6 @@ __all__.extend(analytic_moments.__all__)
 __all__.extend(element_analysis.__all__)
 __all__.extend(generalized_morse_wavelet.__all__)
 __all__.extend(interpolate.__all__)
-__all__.extend(noise_distribution.__all__)
 __all__.extend(preprocess.__all__)
 __all__.extend(ridge_analysis.__all__)
 __all__.extend(ridge_result.__all__)

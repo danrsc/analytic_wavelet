@@ -8,7 +8,7 @@ from .generalized_morse_wavelet import GeneralizedMorseWavelet
 from matplotlib.patches import Polygon
 
 
-__all__ = ['ElementAnalysisMorse', 'maxima_of_transform']
+__all__ = ['ElementAnalysisMorse', 'maxima_of_transform', 'MaximaPValueInterp1d']
 
 
 # Primary paper:
@@ -140,9 +140,9 @@ class ElementAnalysisMorse:
         # we could support arbitrary shapes here, returning an array of
         # self.beta.shape + self.peak_fraction.shape + self.event_scale.shape + (2, num_samples)
         # keeping morse parameters and peak_fraction scalar for now
-        if not np.isscalar(self.analyzing_beta):
+        if not np.ndim(self.analyzing_beta) == 0:
             raise ValueError('This function is only supported on scalar ElementAnalysisMorse')
-        if not np.isscalar(peak_fraction):
+        if not np.ndim(peak_fraction) == 0:
             raise ValueError('This function only allows scalar values for peak_fraction')
 
         morse_sum_beta = GeneralizedMorseWavelet.replace(
@@ -306,3 +306,69 @@ def maxima_of_transform(x, scale_frequencies, min_modulus=None, freq_axis=-2, ti
         w0[indices_less_1], w0[indices], w0[indices_plus_1], freq_hat)
     scale_frequencies_interp = interp1d(np.arange(len(scale_frequencies)), scale_frequencies)
     return indices, interpolated, scale_frequencies_interp(freq_hat)
+
+
+class MaximaPValueInterp1d:
+
+    @staticmethod
+    def from_histogram(histogram, bin_edges):
+        """
+        Create an instance of MaximaPValueInterp1d from the histogram, typically from the output of
+        GeneralizedMorseWavelet.distribution_of_maxima_of_transformed_noise. Note that bin_edges should
+        be normalized by the root-wavelet-spectrum of the noise, as in Eq. (4.11) in Lilly 2017. If these
+        are the outputs of GeneralizedMorseWavelet.distribution_of_maxima_of_transformed_noise, the bin_edges
+        are already normalized.
+        Args:
+            histogram: The values of each histogram bin
+            bin_edges: The bin-edges for each bin
+
+        Returns:
+            An instance of MaximaPValueInterp1d.
+        """
+        cdf = np.cumsum(histogram)
+        cdf = cdf / cdf[-1]
+        p = 1 - cdf
+        bin_centers = np.diff(bin_edges) / 2 + bin_edges[:-1]
+        return MaximaPValueInterp1d(bin_centers, p)
+
+    def __init__(self, normalized_maxima, p_value):
+        """
+        Wrapper around interp1d which returns 1 when the modulus is below the lower bound and 0 when the modulus is
+        above the upper bound
+        Args:
+            normalized_maxima: The maxima we will be interpolating over. These should be normalized as in Eq. (4.11)
+                in Lilly 2017. Typically the normalization is done by:
+                    # Estimate the root-wavelet-spectrum of noise by assuming the highest-frequency wavelet transform
+                    # only captures noise
+                    w = analytic_wavelet_transform(...)
+                    sigma_noise = np.sqrt(np.mean(np.square(np.abs(w[np.argmax(omega)]))))
+                    # for white noise, sigma_scale_i ** 2 / sigma_scale_j ** 2 = omega_scale_i / omega_scale_j
+
+                    # thus we have:
+                    sigma_noise = np.sqrt(np.mean(np.square(np.abs(w[np.argmax(omega)]))))
+                    w_tilde = w / sigma_noise * np.sqrt(omega / np.max(omega))
+            p_value: The p_values of each normalized_maxima
+        """
+        self._min_value = np.min(normalized_maxima)
+        self._interp = interp1d(normalized_maxima, p_value, bounds_error=False, fill_value=0)
+
+    def __call__(self, normalized_maxima):
+        """
+        Wrapper around interp1d which returns 1 when normalized_maxima is below the lower bound of the maxima being
+        interpolated over and 0 when normalized_maxima is above the upper bound of the maxima being interpolated over.
+        Args:
+            normalized_maxima: The maxima we will be computing p-values for. These should be normalized as in Eq. (4.11)
+                in Lilly 2017. Typically the normalization is done by:
+                    # Estimate the root-wavelet-spectrum of noise by assuming the highest-frequency wavelet transform
+                    # only captures noise
+                    w = analytic_wavelet_transform(...)
+                    sigma_noise = np.sqrt(np.mean(np.square(np.abs(w[np.argmax(omega)]))))
+                    # for white noise, sigma_scale_i ** 2 / sigma_scale_j ** 2 = omega_scale_i / omega_scale_j
+
+                    # thus we have:
+                    sigma_noise = np.sqrt(np.mean(np.square(np.abs(w[np.argmax(omega)]))))
+                    w_tilde = w / sigma_noise * np.sqrt(omega / np.max(omega))
+        Returns:
+            p_value: The p_values for normalized_maxima
+        """
+        return np.clip(np.where(normalized_maxima < self._min_value, 1, self._interp(normalized_maxima)), 0, 1)

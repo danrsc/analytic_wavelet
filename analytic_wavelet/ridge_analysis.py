@@ -351,11 +351,11 @@ def _indicator_ridge(x, scale_frequencies, ridge_kind, min_amplitude, frequency_
     result[:, -1, :] = False
 
     if frequency_min is not None:
-        if not np.isscalar(frequency_min):
+        if not np.ndim(frequency_min) == 0:
             frequency_min = np.reshape(frequency_min, (result.shape[0],) + (1,) * (len(result.shape) - 1))
         result = np.logical_and(result, frequency > frequency_min)
     if frequency_max is not None:
-        if not np.isscalar(frequency_max):
+        if not np.ndim(frequency_max) == 0:
             frequency_max = np.reshape(frequency_max, (result.shape[0],) + (1,) * (len(result.shape) - 1))
         result = np.logical_and(result, frequency < frequency_max)
 

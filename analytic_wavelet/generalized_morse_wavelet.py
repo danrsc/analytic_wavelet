@@ -251,7 +251,7 @@ class GeneralizedMorseWavelet:
 
             n = np.floor(np.log(high / low) / np.log(r)).astype(int)
 
-            if not np.isscalar(n):
+            if not np.ndim(n) == 0:
                 indices = np.reshape(np.arange(np.max(n) + 1), (1,) * len(n.shape) + (np.max(n) + 1,))
                 indices = np.where(indices < np.expand_dims(n, -1), indices, np.nan)
                 return np.expand_dims(high, 1) / np.power(r, indices)
@@ -261,13 +261,13 @@ class GeneralizedMorseWavelet:
         # helper for log_spaced_frequencies
         omega_high = np.reshape(np.linspace(0, np.pi, 10000), (1,) * len(self.gamma.shape) + (-1,))
         peak_frequency = self.peak_frequency()
-        if not np.isscalar(peak_frequency):
+        if not np.ndim(peak_frequency) == 0:
             peak_frequency = np.expand_dims(peak_frequency, -1)
         # self.gamma.shape + (10000,)
         omega = peak_frequency * np.pi / omega_high
         ln_psi_1 = (self.beta / self.gamma) * np.log((np.exp(1) * self.gamma) / self.beta)
         beta, gamma = self.beta, self.gamma
-        if not np.isscalar(self.beta):
+        if not np.ndim(self.beta) == 0:
             beta, gamma = np.expand_dims(self.beta, -1), np.expand_dims(self.gamma, -1)
         ln_psi_2 = beta * np.log(omega) - np.power(omega, gamma)
         ln_psi = ln_psi_1 + ln_psi_2
@@ -277,7 +277,7 @@ class GeneralizedMorseWavelet:
         indices = np.where(np.log(eta) - ln_psi <= 0, indices, np.nan)
         indices = np.nanmin(indices, axis=-1).astype(int)
         f = np.reshape(omega_high[np.reshape(indices, -1)], indices.shape)
-        if np.isscalar(gamma):
+        if np.ndim(gamma) == 0:
             return f.item()
         return f
 
@@ -287,7 +287,7 @@ class GeneralizedMorseWavelet:
 
     def amplitude(self, orthogonal_family_order=1):
         if self.is_bandpass_normalized:
-            if not np.isscalar(self.beta):
+            if not np.ndim(self.beta) == 0:
                 om = self.peak_frequency()
                 with warnings.catch_warnings():
                     warnings.filterwarnings('ignore', category=RuntimeWarning)
@@ -352,7 +352,7 @@ class GeneralizedMorseWavelet:
         if len(scale_frequencies.shape) > 1:
             raise ValueError('scale frequencies must be at most 1d')
 
-        if np.isscalar(scale_frequencies):
+        if np.ndim(scale_frequencies) == 0:
             scale_frequencies = np.expand_dims(scale_frequencies, 0)
 
         fo = np.reshape(self.peak_frequency(), self.gamma.shape + (1, 1))
@@ -417,7 +417,7 @@ class GeneralizedMorseWavelet:
                 shape = scale_frequency.shape + time.shape
         """
 
-        if not np.isscalar(self.beta):
+        if not np.ndim(self.beta) == 0:
             raise ValueError('This function is only supported for scalar GeneralizedMorseWavelet')
 
         s = np.ones_like(scale_frequency) if self.beta == 0 else self.peak_frequency() / scale_frequency
@@ -490,3 +490,138 @@ class GeneralizedMorseWavelet:
             psi_f = np.moveaxis(psi_f, 0, -3)
         # (..., [wavelet,], freq, time)
         return psi_f
+
+    def _noise_covariance_entry(self, alpha, time_shift, scale, scale_ratio):
+        # covariance between the wavelet transform of noise and itself at another time and scale
+
+        r_tilde = (1 + scale_ratio ** self.gamma) ** (1 / self.gamma)
+
+        noise_morse = GeneralizedMorseWavelet.replace(
+            self, beta=2 * self.beta - 2 * alpha, is_bandpass_normalized=True)
+
+        fact1 = (self.amplitude() ** 2 / noise_morse.amplitude())
+
+        if self.is_bandpass_normalized:
+            fact2 = (((scale_ratio ** self.beta) * (scale ** (2 * alpha - 1)))
+                     / (r_tilde ** (2 * self.beta - 2 * alpha + 1)))
+        else:
+            fact2 = (((scale_ratio ** (self.beta + 1 / 2)) * (scale ** (2 * alpha)))
+                     / (r_tilde ** (2 * self.beta - 2 * alpha + 1)))
+
+        assert (np.ndim(time_shift) == 0)
+        assert (scale.ndim < 2)
+
+        psi = noise_morse.taylor_expansion_time_domain_wavelet(
+            time_shift / (scale * r_tilde), noise_morse.peak_frequency())
+
+        return fact1 * fact2 * np.conj(psi)
+
+    def _noise_covariance(self, alpha, scale_ratio, s):
+        # noise covariance of this point and the 4 adjacent points in the time/scale plane
+        # this is the covariance structure given by Eq. (4.16) in Lilly 2017 assuming that we
+        # group the points as:
+        # [(t, s), (t + 1, s), (t - 1, s), (t, rs), (t, s / r)]
+        sigma_0_0 = self._noise_covariance_entry(alpha, 0, s, 1)
+        sigma = np.full(s.shape + (5, 5), np.nan, dtype=sigma_0_0.dtype)
+        sigma[..., 0, 0] = sigma_0_0
+        sigma[..., 0, 1] = self._noise_covariance_entry(alpha, 1, s, 1)
+        sigma[..., 0, 2] = self._noise_covariance_entry(alpha, -1, s, 1)
+        sigma[..., 0, 3] = self._noise_covariance_entry(alpha, 0, s, scale_ratio)
+        sigma[..., 0, 4] = self._noise_covariance_entry(alpha, 0, s, 1 / scale_ratio)
+        sigma[..., 1, 1] = sigma_0_0
+        sigma[..., 1, 2] = self._noise_covariance_entry(alpha, -2, s, 1)
+        sigma[..., 1, 3] = self._noise_covariance_entry(alpha, -1, s, scale_ratio)
+        sigma[..., 1, 4] = self._noise_covariance_entry(alpha, -1, s, 1 / scale_ratio)
+        sigma[..., 2, 2] = sigma_0_0
+        sigma[..., 2, 3] = self._noise_covariance_entry(alpha, 1, s, scale_ratio)
+        sigma[..., 2, 4] = self._noise_covariance_entry(alpha, 1, s, 1 / scale_ratio)
+        sigma[..., 3, 3] = self._noise_covariance_entry(alpha, 0, scale_ratio * s, 1)
+        sigma[..., 3, 4] = self._noise_covariance_entry(alpha, 0, scale_ratio * s, 1 / scale_ratio ** 2)
+        sigma[..., 4, 4] = self._noise_covariance_entry(alpha, 0, s / scale_ratio, 1)
+
+        for i in range(sigma.shape[-2]):
+            for j in range(i):
+                sigma[..., i, j] = np.conj(sigma[..., j, i])
+
+        moment = self.energy_moment(-2 * alpha)
+        if self.is_bandpass_normalized:
+            sigma = sigma / np.reshape(moment * s ** (2 * alpha - 1), s.shape + (1, 1))
+        else:
+            sigma = sigma / np.reshape(moment * s ** (2 * alpha), s.shape + (1, 1))
+
+        return sigma
+
+    @staticmethod
+    def _get_noise_maxima_values(cholesky_lower, num_monte_carlo_realizations):
+        noise_shape = cholesky_lower.shape[:-1] + (num_monte_carlo_realizations,)
+        noise = (np.random.randn(*noise_shape) + 1j * np.random.randn(*noise_shape)) / np.sqrt(2)
+        noise = np.abs(np.matmul(cholesky_lower, noise))
+        # remember which samples have the unshifted and unscaled noise as the maximum
+        indices_maxima = np.nonzero(np.argmax(noise, axis=-2) == 0)
+        # now that we know which samples to keep, remove the translated values
+        noise = noise[..., 0, :]
+        # return the coordinates of the maxima and the maxima values
+        return indices_maxima, noise[indices_maxima]
+
+    def distribution_of_maxima_of_transformed_noise(
+            self,
+            spectral_slope,
+            scale_ratio,
+            scale_frequency=None,
+            num_monte_carlo_realizations=1000,
+            max_batch_size=1e7,
+            **histogram_kwargs):
+        """
+        Returns a histogram of the modulus of the maxima of noise transformed by the analytic wavelet transform using
+        the specified GeneralizedMorseWavelet. The transform is not actually run on the noise. Rather the method
+        described in Lilly 2017 which uses the analytically determined covariance structure of noise after the
+        transform is used. This function should be run on only a single scale-frequency. All scale-frequencies will
+        give the same results, as shown in Lilly 2017.
+        Args:
+            spectral_slope: The slope of the noise. (alpha in Lilly 2017). 0 gives white noise. 1 gives red noise.
+            scale_ratio: This is the ratio of a scale to the next smaller scale in a planned run of element analysis.
+            scale_frequency: Which scale frequency to compute the distribution for. A scalar value. If None, the
+                morse wavelet peak_frequency is used
+            num_monte_carlo_realizations: How many random samples to use for estimating the distribution.
+            max_batch_size: No more than this many monte-carlo-realizations will be computed simultaneously. This
+                keeps us from running out of memory
+            **histogram_kwargs: Arguments to np.histogram. Note that the 'weights' argument is not allowed here
+                and a ValueError will be raised if it is used.
+        Returns:
+            hist: The binned moduli of the maxima as returned by np.histogram.
+            bin_edges: The edges of the bins of hist, similar to np.histogram. Note that bin_edges may vary from
+                scale_frequency to scale_frequency. If scale_frequencies is not scalar, then this will be a list with
+                bin_edges[i] corresponding to scale_frequencies[i]
+        """
+
+        if not np.ndim(self.beta) == 0:
+            raise ValueError('This function is only supported on scalar instances of GeneralizedMorseWavelet')
+        if not np.ndim(spectral_slope) == 0:
+            raise ValueError('spectral_slope must be scalar')
+        if scale_frequency is None:
+            scale_frequency = self.peak_frequency()
+        if not np.ndim(scale_frequency) == 0:
+            raise ValueError('scale_frequency must be scalar')
+
+        scale = self.peak_frequency() / scale_frequency
+
+        if 'weights' in histogram_kwargs:
+            raise ValueError('weights is disallowed in histogram_kwargs')
+
+        sigma = self._noise_covariance(spectral_slope, scale_ratio, scale)
+        lower = np.linalg.cholesky(sigma)
+
+        if num_monte_carlo_realizations > max_batch_size:
+            # divide up evenly
+            num_batches = int(np.ceil(num_monte_carlo_realizations / max_batch_size))
+            batch_size = num_monte_carlo_realizations // num_batches
+            maxima_values = list()
+            for idx in range(num_batches):
+                b = num_monte_carlo_realizations - batch_size * idx if idx == (num_batches - 1) else batch_size
+                _, v = GeneralizedMorseWavelet._get_noise_maxima_values(lower, b)
+                maxima_values.extend(v)
+            maxima_values = np.array(maxima_values)
+        else:
+            _, maxima_values = GeneralizedMorseWavelet._get_noise_maxima_values(lower, num_monte_carlo_realizations)
+
+        return np.histogram(maxima_values, **histogram_kwargs)

@@ -34,6 +34,6 @@ Rough mappings from functions in jLab to functions/methods in analytic_wavelet. 
 | ridgemap | <ul><li>RidgeResult.ridge_values</li><li>RidgeResult.instantaneous_frequency</li><li>RidgeResult.instantaneous_bandwidth</li><li>RidgeResult.instantaneous_curvature</li><li>RidgeResult.total_error</li><li>RidgeResult.get_values</li><li>RidgeResult.ridge_ids</li><li>RidgeResult.collapse</li></ul> |
 | rot | rotate |
 | transmax | maxima_of_transform |
-| transmaxdist | distribution_of_maxima_of_transformed_noise |
+| transmaxdist | GeneralizedMorseWavelet.distribution_of_maxima_of_transformed_noise |
 | wavespecplot | <ul><li>wavelet_contourf</li><li>time_series_plot</li></ul> |
 | wavetrans | <ul><li>analytic_wavelet_transform</li><li>to_frequency_domain_wavelet</li><li>masked_detrend</li><li>make_unpad_slices</li><li>unpad</li></ul> |
