@@ -1,4 +1,7 @@
 import inspect
+from concurrent.futures import ProcessPoolExecutor
+from itertools import repeat
+
 import numpy as np
 import scipy.special
 from scipy.interpolate import interp1d
@@ -188,7 +191,9 @@ class ElementAnalysisMorse:
             maxima_scale_frequencies,
             influence_region_peak_fraction=0.5,
             influence_region_num_samples=1000,
-            time_axis=-1):
+            freq_axis=-2,
+            time_axis=-1,
+            is_parallel=False):
         """
         Identifies maxima which are isolated. A maximum is isolated if no maximum of larger modulus exists
         within its region of influence.
@@ -201,7 +206,9 @@ class ElementAnalysisMorse:
                 has fallen off to this fraction of its peak value
             influence_region_num_samples: How many samples of the contour around the region of influence should be
                 used to describe the region as a polygon.
+            freq_axis: Which axis in the coordinates is the frequency axis
             time_axis: Which axis in the coordinates is the time axis
+            is_parallel: If True, this operation will be done using the concurrent.futures.ProcessPoolExecutor
 
         Returns:
             indicator_isolated: A 1-d array of boolean values, the same length as maxima_coefficients which
@@ -214,6 +221,18 @@ class ElementAnalysisMorse:
         # sort in order of descending magnitude
         indices_sort = np.argsort(-np.abs(maxima_coefficients))
         indices_maxima = tuple(ind[indices_sort] for ind in indices_maxima)
+
+        # we only want to compare over time/freq, so create ids from the other axes
+        if len(indices_maxima) > 2:
+            indicator_other = np.full(len(indices_maxima), True)
+            indicator_other[freq_axis] = False
+            indicator_other[time_axis] = False
+            other_axes = np.concatenate(
+                [np.expand_dims(ax, 1) for is_other, ax in zip(indicator_other, indices_maxima) if is_other], axis=1)
+            _, other_axis_id = np.unique(other_axes, axis=0, return_inverse=True)
+        else:
+            other_axis_id = np.zeros(len(indices_maxima[0]))
+
         maxima_coefficients = maxima_coefficients[indices_sort]
         maxima_scale_frequencies = maxima_scale_frequencies[indices_sort]
         c, rho, f_rho = self.event_parameters(maxima_coefficients, maxima_scale_frequencies)
@@ -230,13 +249,19 @@ class ElementAnalysisMorse:
             np.expand_dims(f_rho, 1),
             np.expand_dims(indices_maxima[time_axis], 1)], axis=1)
 
-        indicator_isolated = np.full(len(influence_regions), True)
+        if is_parallel:
+            with ProcessPoolExecutor() as ex:
+                indicator_isolated = np.array(list(ex.map(
+                    _is_isolated,
+                    repeat(points, influence_regions.shape[0]),
+                    repeat(other_axis_id, influence_regions.shape[0]),
+                    influence_regions,
+                    range(influence_regions.shape[0]))))
+        else:
+            indicator_isolated = np.full(len(influence_regions), False)
 
-        for idx, event_region_coordinates in enumerate(influence_regions):
-            if idx == 0:
-                continue
-            polygon = Polygon(event_region_coordinates)
-            indicator_isolated[idx] = not np.any(polygon.contains_points(points[:idx]))
+            for idx, event_region_coordinates in enumerate(influence_regions):
+                indicator_isolated[idx] = _is_isolated(points, other_axis_id, event_region_coordinates, idx)
 
         # restore to (num_maxima, 2, num_polygon_points)
         influence_regions = np.moveaxis(influence_regions, -1, -2)
@@ -349,6 +374,7 @@ class MaximaPValueInterp1d:
                     w_tilde = w / sigma_noise * np.sqrt(omega / np.max(omega))
             p_value: The p_values of each normalized_maxima
         """
+        normalized_maxima = np.abs(normalized_maxima)
         self._min_value = np.min(normalized_maxima)
         self._interp = interp1d(normalized_maxima, p_value, bounds_error=False, fill_value=0)
 
@@ -371,4 +397,12 @@ class MaximaPValueInterp1d:
         Returns:
             p_value: The p_values for normalized_maxima
         """
+        normalized_maxima = np.abs(normalized_maxima)
         return np.clip(np.where(normalized_maxima < self._min_value, 1, self._interp(normalized_maxima)), 0, 1)
+
+
+def _is_isolated(points, compare_id, event_region_coordinates, idx):
+    if idx == 0:
+        return True
+    polygon = Polygon(event_region_coordinates)
+    return not np.any(polygon.contains_points(points[:idx][compare_id[:idx] == compare_id[idx]]))
