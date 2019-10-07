@@ -305,15 +305,19 @@ def maxima_of_transform(x, scale_frequencies, min_modulus=None, freq_axis=-2, ti
     slices = [slice(None)] * len(x.shape)
 
     # remove start/end points on time axis
+    # noinspection PyTypeChecker
     slices[time_axis] = 0
     indicator[tuple(slices)] = False
+    # noinspection PyTypeChecker
     slices[time_axis] = -1
     indicator[tuple(slices)] = False
     slices[time_axis] = slice(None)
 
     # remove start/end points on freq axis
+    # noinspection PyTypeChecker
     slices[freq_axis] = 0
     indicator[tuple(slices)] = False
+    # noinspection PyTypeChecker
     slices[freq_axis] = -1
     indicator[tuple(slices)] = False
 
