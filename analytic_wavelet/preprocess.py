@@ -13,6 +13,7 @@ def _masked_detrend(arr, axis=-1):
     to_fit = np.reshape(to_fit, (to_fit.shape[0], -1))
 
     # some columns might not have any data
+    # noinspection PyUnresolvedReferences
     indicator_can_fit = np.logical_not(np.all(to_fit.mask, axis=0))
 
     p = np.ma.polyfit(x, to_fit[:, indicator_can_fit], deg=1)
