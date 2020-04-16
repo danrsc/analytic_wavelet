@@ -229,7 +229,6 @@ class GeneralizedMorseWavelet:
             if low is None and endpoint_overlap is None:
                 if num_timepoints is None:
                     raise ValueError('When low is not provided, num_timepoints must be specified.')
-                low = num_timepoints
                 endpoint_overlap = 5
             if endpoint_overlap is not None and num_timepoints is None:
                 raise ValueError('When endpoint_overlap is set, num_timepoints must be specified.')
@@ -243,7 +242,7 @@ class GeneralizedMorseWavelet:
                 else:
                     high = np.where(nyquist_high < high, nyquist_high, high)
             if endpoint_overlap is not None:
-                endpoint_low = self._low_frequency_cutoff(r, num_timepoints)
+                endpoint_low = self._low_frequency_cutoff(endpoint_overlap, num_timepoints)
                 if low is None:
                     low = endpoint_low
                 else:
